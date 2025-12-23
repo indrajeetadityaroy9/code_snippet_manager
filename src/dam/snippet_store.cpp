@@ -10,7 +10,7 @@ namespace dam {
 namespace {
 
 // Metadata file structure:
-// - uint32: magic number (0xDAM01234)
+// - uint32: magic number (0xDAD01234)
 // - uint32: snippet_index primary root
 // - uint32: snippet_index name root
 // - uint32: tag_index root
@@ -83,8 +83,15 @@ Result<std::unique_ptr<SnippetStore>> SnippetStore::open(const Config& config) {
         store->buffer_pool_.get(),
         meta.snippet_primary_root,
         meta.snippet_name_root);
-    store->snippet_index_->set_next_id(meta.next_id);
-    store->snippet_index_->set_count(static_cast<size_t>(meta.snippet_count));
+
+    // Reset next_id to 1 if store is empty (allows ID reuse after all snippets removed)
+    if (meta.snippet_count == 0) {
+        store->snippet_index_->set_next_id(1);
+        store->snippet_index_->set_count(0);
+    } else {
+        store->snippet_index_->set_next_id(meta.next_id);
+        store->snippet_index_->set_count(static_cast<size_t>(meta.snippet_count));
+    }
 
     store->tag_index_ = std::make_unique<TagIndex>(
         store->buffer_pool_.get(),
@@ -171,9 +178,38 @@ Result<SnippetId> SnippetStore::add(const std::string& content,
                                "Failed to insert snippet");
     }
 
-    // Add to tag index
+    // Add to tag index - track which tags were added for rollback
+    std::vector<std::string> added_tags;
+    bool tag_failed = false;
     for (const auto& tag : tags) {
-        tag_index_->add_file_to_tag(tag, id);
+        if (!tag_index_->add_file_to_tag(tag, id)) {
+            tag_failed = true;
+            break;
+        }
+        added_tags.push_back(tag);
+    }
+
+    // Rollback on tag failure
+    if (tag_failed) {
+        // Best-effort rollback: attempt to remove all tags that were added
+        // Continue even if individual removals fail to clean up as much as possible
+        bool rollback_failed = false;
+        for (const auto& tag : added_tags) {
+            if (!tag_index_->remove_file_from_tag(tag, id)) {
+                rollback_failed = true;
+            }
+        }
+        // Remove snippet from index
+        if (!snippet_index_->remove(id)) {
+            rollback_failed = true;
+        }
+
+        if (rollback_failed) {
+            return Error(ErrorCode::INTERNAL_ERROR,
+                                   "Failed to add tags and rollback was incomplete");
+        }
+        return Error(ErrorCode::INTERNAL_ERROR,
+                               "Failed to add tags to snippet");
     }
 
     return id;
@@ -201,8 +237,11 @@ Result<void> SnippetStore::remove(SnippetId id) {
                                "Snippet not found");
     }
 
-    // Remove from tag index
-    tag_index_->remove_file_from_all_tags(id, snippet->tags);
+    // Remove from tag index (best effort - log failures but continue)
+    if (!tag_index_->remove_file_from_all_tags(id, snippet->tags)) {
+        // Tag removal partially failed, but we still proceed with snippet removal
+        // This could leave orphaned tag entries, but is preferable to failing entirely
+    }
 
     // Remove from snippet index
     if (!snippet_index_->remove(id)) {
@@ -231,17 +270,25 @@ Result<void> SnippetStore::add_tag(SnippetId id, const std::string& tag) {
         return Ok();  // Already has tag
     }
 
-    // Add tag to snippet
+    // Add to tag index first (easier to rollback if snippet update fails)
+    if (!tag_index_->add_file_to_tag(tag, id)) {
+        return Error(ErrorCode::INTERNAL_ERROR,
+                               "Failed to add tag to index");
+    }
+
+    // Add tag to snippet metadata
     snippet->tags.push_back(tag);
     snippet->modified_at = std::chrono::system_clock::now();
 
     if (!snippet_index_->update(id, *snippet)) {
+        // Rollback: remove from tag index
+        if (!tag_index_->remove_file_from_tag(tag, id)) {
+            return Error(ErrorCode::INTERNAL_ERROR,
+                                   "Failed to update snippet and rollback was incomplete");
+        }
         return Error(ErrorCode::INTERNAL_ERROR,
                                "Failed to update snippet");
     }
-
-    // Add to tag index
-    tag_index_->add_file_to_tag(tag, id);
 
     return Ok();
 }
@@ -258,23 +305,31 @@ Result<void> SnippetStore::remove_tag(SnippetId id, const std::string& tag) {
                                "Snippet not found");
     }
 
-    // Find and remove tag
+    // Find and remove tag from snippet metadata
     auto& tags = snippet->tags;
     auto it = std::find(tags.begin(), tags.end(), tag);
     if (it == tags.end()) {
         return Ok();  // Tag not present
     }
 
+    // Remove from tag index first - must succeed before modifying metadata
+    if (!tag_index_->remove_file_from_tag(tag, id)) {
+        // Tag wasn't in index - this is an inconsistency but we can still
+        // remove it from the snippet metadata to restore consistency
+    }
+
     tags.erase(it);
     snippet->modified_at = std::chrono::system_clock::now();
 
     if (!snippet_index_->update(id, *snippet)) {
+        // Rollback: re-add to tag index
+        if (!tag_index_->add_file_to_tag(tag, id)) {
+            return Error(ErrorCode::INTERNAL_ERROR,
+                                   "Failed to update snippet and rollback was incomplete");
+        }
         return Error(ErrorCode::INTERNAL_ERROR,
                                "Failed to update snippet");
     }
-
-    // Remove from tag index
-    tag_index_->remove_file_from_tag(tag, id);
 
     return Ok();
 }

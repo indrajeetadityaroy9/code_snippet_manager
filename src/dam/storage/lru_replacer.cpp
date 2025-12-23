@@ -6,7 +6,7 @@ LRUReplacer::LRUReplacer(size_t capacity)
     : capacity_(capacity)
 {}
 
-void LRUReplacer::unpin(size_t frame_id) {
+bool LRUReplacer::unpin(size_t frame_id) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     auto it = frame_map_.find(frame_id);
@@ -15,14 +15,16 @@ void LRUReplacer::unpin(size_t frame_id) {
         lru_list_.erase(it->second);
         lru_list_.push_front(frame_id);
         it->second = lru_list_.begin();
+        return true;
     } else {
         // Add new frame at front (MRU)
         if (lru_list_.size() >= capacity_) {
-            // Should not happen if used correctly with buffer pool
-            return;
+            // Capacity exceeded - cannot add frame
+            return false;
         }
         lru_list_.push_front(frame_id);
         frame_map_[frame_id] = lru_list_.begin();
+        return true;
     }
 }
 

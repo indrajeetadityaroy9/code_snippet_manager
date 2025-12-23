@@ -48,6 +48,8 @@ Page* BufferPool::fetch_page(PageId page_id) {
     if (frame_info_[frame_id].page_id != INVALID_PAGE_ID) {
         auto result = evict_page(static_cast<size_t>(frame_id));
         if (!result.ok()) {
+            // Eviction failed - restore frame to replacer so it can be tried again later
+            replacer_.unpin(static_cast<size_t>(frame_id));
             return nullptr;
         }
     }
@@ -91,6 +93,8 @@ Page* BufferPool::new_page() {
     if (frame_info_[frame_id].page_id != INVALID_PAGE_ID) {
         auto result = evict_page(static_cast<size_t>(frame_id));
         if (!result.ok()) {
+            // Eviction failed - restore frame to replacer so it can be tried again later
+            replacer_.unpin(static_cast<size_t>(frame_id));
             disk_manager_->deallocate_page(page_id);
             return nullptr;
         }
@@ -219,6 +223,9 @@ bool BufferPool::delete_page(PageId page_id) {
     }
 
     // Deallocate on disk
+    // Note: deallocate_page() returns void - deallocation currently cannot fail.
+    // If the page wasn't in the buffer pool, we still deallocate on disk to
+    // handle pages that were never loaded.
     disk_manager_->deallocate_page(page_id);
     return true;
 }

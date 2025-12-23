@@ -172,12 +172,15 @@ private:
 
 /**
  * BPlusTreeIterator - Iterator for range scans over a B+ tree.
+ *
+ * Caches the current entry to avoid use-after-free if the page
+ * is evicted between iterator operations.
  */
 class BPlusTreeIterator {
 public:
     BPlusTreeIterator(BufferPool* buffer_pool, PageId leaf_id, size_t index);
 
-    bool valid() const { return leaf_id_ != INVALID_PAGE_ID; }
+    bool valid() const { return leaf_id_ != INVALID_PAGE_ID && cached_valid_; }
 
     std::pair<std::string, std::string> operator*() const;
 
@@ -187,9 +190,13 @@ public:
     bool operator!=(const BPlusTreeIterator& other) const { return !(*this == other); }
 
 private:
+    void cache_current_entry();  // Fetch and cache current key-value
+
     BufferPool* buffer_pool_;
     PageId leaf_id_;
     size_t index_;
+    std::pair<std::string, std::string> cached_entry_;
+    bool cached_valid_ = false;
 };
 
 }  // namespace dam

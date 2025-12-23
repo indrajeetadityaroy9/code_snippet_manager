@@ -44,23 +44,34 @@ LogRecord LogRecord::deserialize(const char* buffer, size_t len) {
     std::memcpy(&record.type, buffer + offset, 1); offset += 1;
     std::memcpy(&record.page_id, buffer + offset, 4); offset += 4;
 
+    // Read key_len - check bounds first
+    if (offset + 4 > len) return record;
     uint32_t key_len;
     std::memcpy(&key_len, buffer + offset, 4); offset += 4;
-    if (offset + key_len <= len) {
+    // Overflow-safe check: key_len <= len - offset (which is equivalent but safe)
+    if (key_len <= len - offset) {
         record.key = std::string(buffer + offset, key_len);
         offset += key_len;
+    } else {
+        return record;  // Corrupted or truncated
     }
 
+    // Read val_len - check bounds first
+    if (offset + 4 > len) return record;
     uint32_t val_len;
     std::memcpy(&val_len, buffer + offset, 4); offset += 4;
-    if (offset + val_len <= len) {
+    if (val_len <= len - offset) {
         record.value = std::string(buffer + offset, val_len);
         offset += val_len;
+    } else {
+        return record;
     }
 
+    // Read old_len - check bounds first
+    if (offset + 4 > len) return record;
     uint32_t old_len;
     std::memcpy(&old_len, buffer + offset, 4); offset += 4;
-    if (offset + old_len <= len) {
+    if (old_len <= len - offset) {
         record.old_value = std::string(buffer + offset, old_len);
     }
 
@@ -236,6 +247,14 @@ LSN WriteAheadLog::append_record(const LogRecord& record) {
     rec.lsn = current_lsn_++;
 
     size_t size = rec.serialized_size();
+
+    // Check if single record is too large for buffer (would overflow)
+    if (size + 4 > buffer_size_) {
+        // Record too large - cannot be written to WAL buffer
+        // Decrement LSN since we're not actually writing this record
+        --current_lsn_;
+        return INVALID_LSN;
+    }
 
     // Check if we need to flush
     if (buffer_offset_ + size + 4 > buffer_size_) {

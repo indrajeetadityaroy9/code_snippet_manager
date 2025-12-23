@@ -29,8 +29,9 @@ public:
      * If the frame is already in the replacer, moves it to MRU position.
      *
      * @param frame_id The frame to add/update
+     * @return true if frame was added/updated, false if capacity exceeded
      */
-    void unpin(size_t frame_id);
+    bool unpin(size_t frame_id);
 
     /**
      * Remove a frame from the replacer (called when page is pinned).

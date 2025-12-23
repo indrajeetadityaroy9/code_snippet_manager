@@ -1,12 +1,16 @@
 #include <dam/dam.hpp>
+#include <dam/util/crc32.hpp>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <sys/wait.h>
+#include <unistd.h>
 
 namespace {
 
@@ -49,6 +53,155 @@ std::string read_stdin() {
     std::ostringstream ss;
     ss << std::cin.rdbuf();
     return ss.str();
+}
+
+// Get editor from environment
+std::string get_editor() {
+    const char* editor = std::getenv("EDITOR");
+    if (editor && editor[0] != '\0') return editor;
+
+    editor = std::getenv("VISUAL");
+    if (editor && editor[0] != '\0') return editor;
+
+    // Fallback to common editors
+    if (std::system("command -v vim >/dev/null 2>&1") == 0) return "vim";
+    if (std::system("command -v vi >/dev/null 2>&1") == 0) return "vi";
+    if (std::system("command -v nano >/dev/null 2>&1") == 0) return "nano";
+
+    return "";
+}
+
+// Safely run editor using fork/exec (avoids shell injection)
+int run_editor(const std::string& editor, const std::string& filepath) {
+    pid_t pid = fork();
+    if (pid == -1) {
+        return -1;  // fork failed
+    }
+
+    if (pid == 0) {
+        // Child process - exec the editor
+        // Parse editor command (handle "vim" vs "/usr/bin/vim" vs "code --wait")
+        std::vector<std::string> args;
+        std::istringstream iss(editor);
+        std::string token;
+        while (iss >> token) {
+            args.push_back(token);
+        }
+        args.push_back(filepath);
+
+        // Convert to char* array for execvp
+        // Store pointers to c_str() - safe because args vector outlives execvp call
+        std::vector<const char*> argv_ptrs;
+        argv_ptrs.reserve(args.size() + 1);
+        for (const auto& arg : args) {
+            argv_ptrs.push_back(arg.c_str());
+        }
+        argv_ptrs.push_back(nullptr);
+
+        // execvp expects char* const[], cast away const (execvp doesn't modify args)
+        execvp(argv_ptrs[0], const_cast<char* const*>(argv_ptrs.data()));
+        // If execvp returns, it failed
+        _exit(127);
+    }
+
+    // Parent process - wait for child
+    int status;
+    if (waitpid(pid, &status, 0) == -1) {
+        return -1;
+    }
+
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    return -1;
+}
+
+// Open editor and return content
+std::pair<bool, std::string> open_editor(const std::string& initial_content = "",
+                                          const std::string& extension = ".txt") {
+    std::string editor = get_editor();
+    if (editor.empty()) {
+        std::cerr << "Error: No editor found. Set $EDITOR environment variable.\n";
+        return {false, ""};
+    }
+
+    // Create temp file
+    std::filesystem::path temp_dir = std::filesystem::temp_directory_path();
+    std::filesystem::path temp_file = temp_dir / ("dam_edit_XXXXXX" + extension);
+
+    // Generate unique filename
+    std::string temp_path = temp_file.string();
+    char* temp_cstr = &temp_path[0];
+    int fd = mkstemps(temp_cstr, static_cast<int>(extension.length()));
+    if (fd == -1) {
+        std::cerr << "Error: Could not create temporary file\n";
+        return {false, ""};
+    }
+    close(fd);
+    temp_file = temp_path;
+
+    // Write initial content
+    {
+        std::ofstream out(temp_file);
+        if (!out) {
+            std::cerr << "Error: Could not write to temporary file\n";
+            std::filesystem::remove(temp_file);
+            return {false, ""};
+        }
+        out << initial_content;
+    }
+
+    // Compute hash of initial content for change detection (more reliable than mtime)
+    uint32_t before_hash = dam::CRC32::compute(initial_content);
+
+    // Open editor using safe fork/exec
+    int result = run_editor(editor, temp_file.string());
+
+    if (result != 0) {
+        std::cerr << "Error: Editor exited with error\n";
+        std::filesystem::remove(temp_file);
+        return {false, ""};
+    }
+
+    // Read content
+    std::string content = read_file(temp_file);
+
+    // Clean up
+    std::filesystem::remove(temp_file);
+
+    // Check if content was modified using hash comparison
+    uint32_t after_hash = dam::CRC32::compute(content);
+    if (before_hash == after_hash && !initial_content.empty()) {
+        std::cout << "No changes made.\n";
+        return {false, ""};
+    }
+
+    // Check for empty content
+    if (content.empty() || content.find_first_not_of(" \t\n\r") == std::string::npos) {
+        std::cout << "Empty content, cancelled.\n";
+        return {false, ""};
+    }
+
+    return {true, content};
+}
+
+// Get file extension for language
+std::string get_extension_for_lang(const std::string& lang) {
+    if (lang == "python") return ".py";
+    if (lang == "bash" || lang == "shell") return ".sh";
+    if (lang == "javascript") return ".js";
+    if (lang == "typescript") return ".ts";
+    if (lang == "cpp" || lang == "c++") return ".cpp";
+    if (lang == "c") return ".c";
+    if (lang == "go") return ".go";
+    if (lang == "rust") return ".rs";
+    if (lang == "ruby") return ".rb";
+    if (lang == "java") return ".java";
+    if (lang == "sql") return ".sql";
+    if (lang == "yaml") return ".yaml";
+    if (lang == "json") return ".json";
+    if (lang == "markdown") return ".md";
+    return ".txt";
 }
 
 // Parse command line for option value
@@ -102,10 +255,32 @@ const char* get_positional(int argc, char* argv[]) {
     return nullptr;
 }
 
-// Truncate string for display
+// Truncate string for display (Bug #36 fix: prevent underflow)
 std::string truncate(const std::string& s, size_t max_len) {
+    if (max_len <= 3) return s.substr(0, max_len);  // Prevent underflow
     if (s.length() <= max_len) return s;
     return s.substr(0, max_len - 3) + "...";
+}
+
+// Safely parse a snippet ID from string (Bug #19 fix: check for overflow)
+std::optional<dam::SnippetId> parse_snippet_id(const char* str) {
+    if (!str || !*str) return std::nullopt;
+
+    char* end;
+    errno = 0;
+    long long val = std::strtoll(str, &end, 10);
+
+    // Check for parse errors
+    if (end == str || *end != '\0') {
+        return std::nullopt;  // Not a valid number
+    }
+
+    // Check for overflow
+    if (errno == ERANGE || val <= 0 || val > static_cast<long long>(UINT64_MAX)) {
+        return std::nullopt;
+    }
+
+    return static_cast<dam::SnippetId>(val);
 }
 
 // Format timestamp
@@ -148,10 +323,20 @@ int cmd_add(int argc, char* argv[]) {
         content = read_file(path);
         snippet_name = name ? name : path.filename().string();
     } else {
-        std::cerr << "Error: No input file or --stdin specified\n";
-        std::cerr << "Usage: dam add <file> [-n name] [-t tag]... [-l lang] [-d desc]\n";
-        std::cerr << "       dam add --stdin -n <name> [-t tag]...\n";
-        return 1;
+        // Default: open editor to create snippet
+        if (!name) {
+            std::cerr << "Error: --name is required\n";
+            std::cerr << "Usage: dam add -n <name> [-t tag]... [-l lang]\n";
+            return 1;
+        }
+        snippet_name = name;
+
+        std::string extension = lang ? get_extension_for_lang(lang) : ".txt";
+        auto [success, editor_content] = open_editor("", extension);
+        if (!success) {
+            return 1;
+        }
+        content = editor_content;
     }
 
     auto store = open_store();
@@ -189,10 +374,9 @@ int cmd_get(int argc, char* argv[]) {
     std::optional<dam::SnippetMetadata> snippet;
 
     // Try as ID first
-    char* end;
-    long id = std::strtol(id_or_name, &end, 10);
-    if (*end == '\0' && id > 0) {
-        snippet = store->get(static_cast<dam::SnippetId>(id));
+    auto parsed_id = parse_snippet_id(id_or_name);
+    if (parsed_id.has_value()) {
+        snippet = store->get(*parsed_id);
     }
 
     // Try as name
@@ -229,6 +413,77 @@ int cmd_get(int argc, char* argv[]) {
         }
     }
 
+    return 0;
+}
+
+int cmd_edit(int argc, char* argv[]) {
+    if (argc < 1) {
+        std::cerr << "Usage: dam edit <id|name>\n";
+        return 1;
+    }
+
+    const char* id_or_name = argv[0];
+
+    auto store = open_store();
+    if (!store) return 1;
+
+    std::optional<dam::SnippetMetadata> snippet;
+    dam::SnippetId id = dam::INVALID_SNIPPET_ID;
+
+    // Try as ID first
+    auto parsed_id = parse_snippet_id(id_or_name);
+    if (parsed_id.has_value()) {
+        id = *parsed_id;
+        snippet = store->get(id);
+    }
+
+    // Try as name
+    if (!snippet.has_value()) {
+        auto found_id = store->find_by_name(id_or_name);
+        if (found_id.has_value()) {
+            id = *found_id;
+            snippet = store->get(id);
+        }
+    }
+
+    if (!snippet.has_value()) {
+        std::cerr << "Error: Snippet not found: " << id_or_name << "\n";
+        return 1;
+    }
+
+    // Open editor with current content
+    std::string extension = get_extension_for_lang(snippet->language);
+    auto [success, new_content] = open_editor(snippet->content, extension);
+
+    if (!success) {
+        return 0;  // User cancelled
+    }
+
+    // Check if content actually changed
+    if (new_content == snippet->content) {
+        std::cout << "No changes made.\n";
+        return 0;
+    }
+
+    // Update snippet - need to remove and re-add since we store content inline
+    auto tags = snippet->tags;
+    auto name = snippet->name;
+    auto lang = snippet->language;
+    auto desc = snippet->description;
+
+    auto remove_result = store->remove(id);
+    if (!remove_result.ok()) {
+        std::cerr << "Error: " << remove_result.error().to_string() << "\n";
+        return 1;
+    }
+
+    auto add_result = store->add(new_content, name, tags, lang, desc);
+    if (!add_result.ok()) {
+        std::cerr << "Error: " << add_result.error().to_string() << "\n";
+        return 1;
+    }
+
+    std::cout << "Updated snippet " << add_result.value() << ": " << name << "\n";
     return 0;
 }
 
@@ -298,10 +553,9 @@ int cmd_rm(int argc, char* argv[]) {
     dam::SnippetId id = dam::INVALID_SNIPPET_ID;
 
     // Try as ID first
-    char* end;
-    long parsed_id = std::strtol(id_or_name, &end, 10);
-    if (*end == '\0' && parsed_id > 0) {
-        id = static_cast<dam::SnippetId>(parsed_id);
+    auto parsed_id = parse_snippet_id(id_or_name);
+    if (parsed_id.has_value()) {
+        id = *parsed_id;
     } else {
         auto found_id = store->find_by_name(id_or_name);
         if (found_id.has_value()) {
@@ -380,14 +634,14 @@ int cmd_tag(int argc, char* argv[]) {
     if (!store) return 1;
 
     // Parse ID
-    char* end;
-    long id = std::strtol(id_str, &end, 10);
-    if (*end != '\0' || id <= 0) {
+    auto parsed_id = parse_snippet_id(id_str);
+    if (!parsed_id.has_value()) {
         std::cerr << "Error: Invalid snippet ID: " << id_str << "\n";
         return 1;
     }
+    dam::SnippetId id = *parsed_id;
 
-    if (!store->get(static_cast<dam::SnippetId>(id)).has_value()) {
+    if (!store->get(id).has_value()) {
         std::cerr << "Error: Snippet not found: " << id << "\n";
         return 1;
     }
@@ -396,14 +650,14 @@ int cmd_tag(int argc, char* argv[]) {
     for (int i = 1; i < argc; ++i) {
         const char* arg = argv[i];
         if (arg[0] == '+') {
-            auto result = store->add_tag(static_cast<dam::SnippetId>(id), arg + 1);
+            auto result = store->add_tag(id, arg + 1);
             if (!result.ok()) {
                 std::cerr << "Error adding tag: " << result.error().to_string() << "\n";
             } else {
                 std::cout << "Added tag: " << (arg + 1) << "\n";
             }
         } else if (arg[0] == '-') {
-            auto result = store->remove_tag(static_cast<dam::SnippetId>(id), arg + 1);
+            auto result = store->remove_tag(id, arg + 1);
             if (!result.ok()) {
                 std::cerr << "Error removing tag: " << result.error().to_string() << "\n";
             } else {
@@ -426,6 +680,7 @@ Usage: dam <command> [options]
 Commands:
   add      Add a new snippet
   get      Retrieve a snippet
+  edit     Edit an existing snippet
   list     List snippets
   rm       Remove a snippet
   tags     List all tags
@@ -442,20 +697,23 @@ Store location: )" << get_default_store_path() << "\n";
         std::cout << R"(Add a new snippet
 
 Usage:
+  dam add -n <name> [-t tag]... [-l lang] [-d desc]
   dam add <file> [-n name] [-t tag]... [-l lang] [-d desc]
   dam add --stdin -n <name> [-t tag]...
-  echo "code" | dam add -n "name" -t tag
 
 Options:
-  -n, --name NAME    Snippet name (default: filename)
+  -n, --name NAME    Snippet name (required, or defaults to filename)
   -t, --tag TAG      Add tag (repeatable)
   -l, --lang LANG    Language (auto-detected if omitted)
   -d, --desc DESC    Description
-  --stdin            Read content from stdin
+  --stdin            Read content from stdin instead of editor
+
+By default, opens $EDITOR to write snippet content.
 
 Examples:
+  dam add -n "deploy script" -l bash -t devops
   dam add script.sh -t bash -t utils
-  dam add config.yaml -n "k8s config" -t k8s -d "Production config"
+  dam add config.yaml -n "k8s config" -t k8s
   echo 'ls -la' | dam add --stdin -n "list files" -t bash
 )";
     } else if (std::strcmp(command, "get") == 0) {
@@ -470,6 +728,21 @@ Examples:
   dam get 1
   dam get "my script"
   dam get 1 --raw > script.sh
+)";
+    } else if (std::strcmp(command, "edit") == 0) {
+        std::cout << R"(Edit an existing snippet
+
+Usage: dam edit <id|name>
+
+Opens the snippet content in $EDITOR. On save, the snippet is updated
+with the new content. All metadata (name, tags, language) is preserved.
+
+Environment:
+  $EDITOR    Preferred editor (falls back to $VISUAL, then vim/vi/nano)
+
+Examples:
+  dam edit 1
+  dam edit "my script"
 )";
     } else if (std::strcmp(command, "list") == 0) {
         std::cout << R"(List snippets
@@ -542,6 +815,7 @@ int main(int argc, char* argv[]) {
 
     if (cmd == "add")   return cmd_add(argc - 2, argv + 2);
     if (cmd == "get")   return cmd_get(argc - 2, argv + 2);
+    if (cmd == "edit")  return cmd_edit(argc - 2, argv + 2);
     if (cmd == "list")  return cmd_list(argc - 2, argv + 2);
     if (cmd == "rm")    return cmd_rm(argc - 2, argv + 2);
     if (cmd == "tags")  return cmd_tags(argc - 2, argv + 2);

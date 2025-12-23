@@ -106,6 +106,11 @@ bool LeafPage::has_space(size_t key_len, size_t val_len) const {
     uint16_t free_start = get_free_space_offset();
     uint16_t data_start = get_data_offset();
 
+    // Prevent underflow on corrupted pages
+    if (data_start < free_start) {
+        return false;
+    }
+
     size_t needed = SLOT_SIZE + key_len + val_len;
     return (data_start - free_start) >= needed;
 }
@@ -136,6 +141,11 @@ bool LeafPage::insert(const std::string& key, const std::string& value) {
     // Allocate space for key-value data at the end
     uint16_t data_offset = get_data_offset();
     size_t total_len = key.size() + value.size();
+
+    // Defensive check: prevent underflow on corrupted pages
+    if (data_offset < total_len) {
+        return false;
+    }
     data_offset -= static_cast<uint16_t>(total_len);
 
     // Write key and value
@@ -204,6 +214,13 @@ bool LeafPage::find(const std::string& key, std::string* value) const {
 
     if (value) {
         Slot slot = get_slot(left);
+
+        // Validate slot data stays within page bounds
+        size_t end_offset = static_cast<size_t>(slot.offset) + slot.key_len + slot.val_len;
+        if (slot.offset < LEAF_HEADER_SIZE || end_offset > Page::DATA_SIZE) {
+            return false;  // Corrupted slot - out of bounds
+        }
+
         const uint8_t* d = data();
         *value = std::string(
             reinterpret_cast<const char*>(d + slot.offset + slot.key_len),
@@ -264,6 +281,13 @@ std::vector<std::pair<std::string, std::string>> LeafPage::get_all() const {
 
     for (size_t i = 0; i < num_keys; ++i) {
         Slot slot = get_slot(i);
+
+        // Validate slot data stays within page bounds
+        size_t end_offset = static_cast<size_t>(slot.offset) + slot.key_len + slot.val_len;
+        if (slot.offset < LEAF_HEADER_SIZE || end_offset > Page::DATA_SIZE) {
+            continue;  // Skip corrupted slot
+        }
+
         const uint8_t* d = data();
 
         std::string key(reinterpret_cast<const char*>(d + slot.offset), slot.key_len);
@@ -277,6 +301,13 @@ std::vector<std::pair<std::string, std::string>> LeafPage::get_all() const {
 
 std::string LeafPage::get_key_at(size_t index) const {
     Slot slot = get_slot(index);
+
+    // Validate slot data stays within page bounds
+    size_t end_offset = static_cast<size_t>(slot.offset) + slot.key_len;
+    if (slot.offset < LEAF_HEADER_SIZE || end_offset > Page::DATA_SIZE) {
+        return "";  // Return empty string for corrupted slot
+    }
+
     const uint8_t* d = data();
     return std::string(reinterpret_cast<const char*>(d + slot.offset), slot.key_len);
 }
@@ -414,6 +445,11 @@ bool InternalPage::has_space(size_t key_len) const {
     uint16_t free_start = get_free_space_offset();
     uint16_t data_start = get_data_offset();
 
+    // Prevent underflow on corrupted pages
+    if (data_start < free_start) {
+        return false;
+    }
+
     size_t needed = SLOT_SIZE + key_len;
     return (data_start - free_start) >= needed;
 }
@@ -438,6 +474,11 @@ bool InternalPage::insert(const std::string& key, PageId right_child) {
 
     // Allocate space for key at the end
     uint16_t data_offset = get_data_offset();
+
+    // Defensive check: prevent underflow on corrupted pages
+    if (data_offset < key.size()) {
+        return false;
+    }
     data_offset -= static_cast<uint16_t>(key.size());
 
     // Write key

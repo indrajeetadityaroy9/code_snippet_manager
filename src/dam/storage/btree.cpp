@@ -35,7 +35,11 @@ PageId BPlusTree::find_leaf(const std::string& key) const {
 
     PageId current_id = root_page_id_;
 
-    while (true) {
+    // Maximum tree depth to detect cycles (a B+ tree with 100+ levels is unrealistic)
+    constexpr int MAX_DEPTH = 100;
+    int depth = 0;
+
+    while (depth < MAX_DEPTH) {
         Page* page = buffer_pool_->fetch_page(current_id);
         if (!page) {
             return INVALID_PAGE_ID;
@@ -50,8 +54,18 @@ PageId BPlusTree::find_leaf(const std::string& key) const {
         InternalPage internal(page);
         PageId child_id = internal.find_child(key);
         buffer_pool_->unpin_page(current_id, false);
+
+        // Check for invalid child pointer
+        if (child_id == INVALID_PAGE_ID) {
+            return INVALID_PAGE_ID;
+        }
+
         current_id = child_id;
+        ++depth;
     }
+
+    // Exceeded maximum depth - likely a cycle or corruption
+    return INVALID_PAGE_ID;
 }
 
 std::optional<std::string> BPlusTree::find(const std::string& key) const {
@@ -140,6 +154,8 @@ PageId BPlusTree::split_leaf(PageId leaf_id, const std::string& key, const std::
 
     Page* old_page = buffer_pool_->fetch_page(leaf_id);
     if (!old_page) {
+        // new_page() returns a pinned page, must unpin before delete
+        buffer_pool_->unpin_page(new_leaf_id, false);
         buffer_pool_->delete_page(new_leaf_id);
         return INVALID_PAGE_ID;
     }
@@ -169,14 +185,31 @@ PageId BPlusTree::split_leaf(PageId leaf_id, const std::string& key, const std::
 
     size_t mid = entries.size() / 2;
 
-    // First half stays in old leaf
+    // First half stays in old leaf - verify all inserts succeed
+    bool insert_failed = false;
     for (size_t i = 0; i < mid; ++i) {
-        reset_old.insert(entries[i].first, entries[i].second);
+        if (!reset_old.insert(entries[i].first, entries[i].second)) {
+            insert_failed = true;
+            break;
+        }
     }
 
     // Second half goes to new leaf
-    for (size_t i = mid; i < entries.size(); ++i) {
-        new_leaf.insert(entries[i].first, entries[i].second);
+    if (!insert_failed) {
+        for (size_t i = mid; i < entries.size(); ++i) {
+            if (!new_leaf.insert(entries[i].first, entries[i].second)) {
+                insert_failed = true;
+                break;
+            }
+        }
+    }
+
+    // If any insert failed, clean up and return failure
+    if (insert_failed) {
+        buffer_pool_->unpin_page(leaf_id, false);
+        buffer_pool_->unpin_page(new_leaf_id, false);
+        buffer_pool_->delete_page(new_leaf_id);
+        return INVALID_PAGE_ID;
     }
 
     // Update sibling pointers using saved values
@@ -218,7 +251,14 @@ void BPlusTree::insert_into_parent(PageId left_id, const std::string& key, PageI
     if (parent_id == INVALID_PAGE_ID) {
         // Left was the root - create new root
         Page* new_root = buffer_pool_->new_page();
-        if (!new_root) return;
+        if (!new_root) {
+            // Critical: Failed to allocate new root. Clean up to prevent orphan pages.
+            // The right page from the split cannot be linked, so deallocate it.
+            // Note: This loses the entries in right_id - a limitation of the current design.
+            buffer_pool_->delete_page(right_id);
+            // Caller's insert into left will also fail, but tree remains consistent.
+            return;
+        }
 
         PageId new_root_id = new_root->get_page_id();
 
@@ -278,6 +318,8 @@ PageId BPlusTree::split_internal(PageId internal_id, const std::string& key, Pag
 
     Page* old_page = buffer_pool_->fetch_page(internal_id);
     if (!old_page) {
+        // new_page() returns a pinned page, must unpin before delete
+        buffer_pool_->unpin_page(new_internal_id, false);
         buffer_pool_->delete_page(new_internal_id);
         return INVALID_PAGE_ID;
     }
@@ -314,17 +356,34 @@ PageId BPlusTree::split_internal(PageId internal_id, const std::string& key, Pag
     InternalPage reset_old(old_page);
     reset_old.set_first_child(first_child);
 
-    // First half stays in old internal
+    // First half stays in old internal - verify all inserts succeed
+    bool insert_failed = false;
     for (size_t i = 0; i < mid; ++i) {
-        reset_old.insert(entries[i].first, entries[i].second);
+        if (!reset_old.insert(entries[i].first, entries[i].second)) {
+            insert_failed = true;
+            break;
+        }
     }
 
     // Set first child of new internal
     new_internal.set_first_child(entries[mid].second);
 
     // Second half (after mid) goes to new internal
-    for (size_t i = mid + 1; i < entries.size(); ++i) {
-        new_internal.insert(entries[i].first, entries[i].second);
+    if (!insert_failed) {
+        for (size_t i = mid + 1; i < entries.size(); ++i) {
+            if (!new_internal.insert(entries[i].first, entries[i].second)) {
+                insert_failed = true;
+                break;
+            }
+        }
+    }
+
+    // If any insert failed, clean up and return failure
+    if (insert_failed) {
+        buffer_pool_->unpin_page(internal_id, false);
+        buffer_pool_->unpin_page(new_internal_id, false);
+        buffer_pool_->delete_page(new_internal_id);
+        return INVALID_PAGE_ID;
     }
 
     // Update parent pointers of children that moved
@@ -365,12 +424,19 @@ bool BPlusTree::remove(const std::string& key) {
     }
 
     bool success = leaf.remove(key);
+
+    // Handle empty root leaf - tree is now empty
+    if (success && leaf_id == root_page_id_ && leaf.get_all().empty()) {
+        // Root is now empty - it's still valid but has no entries
+        // Note: keeping the page allocated avoids issues with sibling pointers
+    }
+
     buffer_pool_->unpin_page(leaf_id, true);
 
     if (success) {
         --size_;
-        // Note: For simplicity, we don't handle underflow/merging here
-        // A production implementation would coalesce underflowed nodes
+        // Note: For non-root nodes, we don't handle underflow/merging.
+        // A production implementation would coalesce underflowed nodes.
     }
 
     return success;
@@ -611,28 +677,38 @@ BPlusTreeIterator::BPlusTreeIterator(BufferPool* buffer_pool, PageId leaf_id, si
     : buffer_pool_(buffer_pool)
     , leaf_id_(leaf_id)
     , index_(index)
-{}
+{
+    cache_current_entry();  // Cache the initial entry
+}
 
-std::pair<std::string, std::string> BPlusTreeIterator::operator*() const {
-    if (!valid()) {
-        return {"", ""};
+void BPlusTreeIterator::cache_current_entry() {
+    cached_valid_ = false;
+    cached_entry_ = {"", ""};
+
+    if (leaf_id_ == INVALID_PAGE_ID) {
+        return;
     }
 
     Page* page = buffer_pool_->fetch_page(leaf_id_);
     if (!page) {
-        return {"", ""};
+        leaf_id_ = INVALID_PAGE_ID;
+        return;
     }
 
     LeafPage leaf(page);
     auto entries = leaf.get_all();
 
-    std::pair<std::string, std::string> result;
     if (index_ < entries.size()) {
-        result = entries[index_];
+        cached_entry_ = entries[index_];
+        cached_valid_ = true;
     }
 
     buffer_pool_->unpin_page(leaf_id_, false);
-    return result;
+}
+
+std::pair<std::string, std::string> BPlusTreeIterator::operator*() const {
+    // Return cached entry to avoid use-after-free
+    return cached_entry_;
 }
 
 BPlusTreeIterator& BPlusTreeIterator::operator++() {
@@ -643,6 +719,7 @@ BPlusTreeIterator& BPlusTreeIterator::operator++() {
     Page* page = buffer_pool_->fetch_page(leaf_id_);
     if (!page) {
         leaf_id_ = INVALID_PAGE_ID;
+        cached_valid_ = false;
         return *this;
     }
 
@@ -658,6 +735,10 @@ BPlusTreeIterator& BPlusTreeIterator::operator++() {
     }
 
     buffer_pool_->unpin_page(page->get_page_id(), false);
+
+    // Cache the new current entry
+    cache_current_entry();
+
     return *this;
 }
 

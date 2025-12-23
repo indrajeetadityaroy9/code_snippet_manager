@@ -76,10 +76,15 @@ bool TagIndex::remove_file_from_tag(const std::string& tag, FileId file_id) {
     return tree_.update(tag, serialize_file_ids(ids));
 }
 
-void TagIndex::remove_file_from_all_tags(FileId file_id, const std::vector<std::string>& tags) {
+bool TagIndex::remove_file_from_all_tags(FileId file_id, const std::vector<std::string>& tags) {
+    bool all_success = true;
     for (const auto& tag : tags) {
-        remove_file_from_tag(tag, file_id);
+        if (!remove_file_from_tag(tag, file_id)) {
+            all_success = false;
+            // Continue removing other tags even if one fails
+        }
     }
+    return all_success;
 }
 
 std::set<FileId> TagIndex::get_files_for_tag(const std::string& tag) const {

@@ -49,8 +49,9 @@ public:
      *
      * @param file_id The file ID to remove
      * @param tags List of tags to remove from
+     * @return true if all removals succeeded
      */
-    void remove_file_from_all_tags(FileId file_id, const std::vector<std::string>& tags);
+    bool remove_file_from_all_tags(FileId file_id, const std::vector<std::string>& tags);
 
     /**
      * Get all file IDs for a tag.

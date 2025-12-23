@@ -43,10 +43,18 @@ public:
         buffer_.append(reinterpret_cast<const char*>(&v), sizeof(v));
     }
 
+    // Maximum string size for serialization (must fit in uint32)
+    static constexpr size_t MAX_WRITE_STRING_SIZE = static_cast<size_t>(UINT32_MAX);
+
     // Write length-prefixed string (uint32 length + data)
-    void write_string(const std::string& s) {
+    // Returns false if string is too large to serialize (> 4GB)
+    bool write_string(const std::string& s) {
+        if (s.size() > MAX_WRITE_STRING_SIZE) {
+            return false;  // String too large for uint32 length prefix
+        }
         write_uint32(static_cast<uint32_t>(s.size()));
         buffer_.append(s);
+        return true;
     }
 
     // Write raw bytes
@@ -76,6 +84,9 @@ private:
  */
 class BinaryReader {
 public:
+    // Maximum string size to prevent memory exhaustion (64 MB)
+    static constexpr size_t MAX_STRING_SIZE = 64 * 1024 * 1024;
+
     explicit BinaryReader(const std::string& data)
         : ptr_(data.data())
         , end_(data.data() + data.size())
@@ -132,10 +143,12 @@ public:
         return true;
     }
 
-    // Read length-prefixed string
+    // Read length-prefixed string (with bounds checking)
     bool read_string(std::string* s) {
+        if (!s) return false;  // NULL check
         uint32_t len;
         if (!read_uint32(&len)) return false;
+        if (len > MAX_STRING_SIZE) return false;  // Prevent memory exhaustion
         if (!has_remaining(len)) return false;
         s->assign(ptr_, len);
         ptr_ += len;

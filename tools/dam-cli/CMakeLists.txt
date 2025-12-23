@@ -6,3 +6,8 @@ add_executable(dam-cli main.cpp)
 set_target_properties(dam-cli PROPERTIES OUTPUT_NAME dam)
 
 target_link_libraries(dam-cli PRIVATE dam)
+
+# Install target
+install(TARGETS dam-cli
+    RUNTIME DESTINATION bin
+)
