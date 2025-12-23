@@ -1,0 +1,17 @@
+build/
+cmake-build-*/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.claude/
+CLAUDE.md
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+.DS_Store
+Thumbs.db
