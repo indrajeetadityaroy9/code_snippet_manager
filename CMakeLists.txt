@@ -12,10 +12,16 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Build options
 option(DAM_BUILD_TESTS "Build unit and integration tests" ON)
 option(DAM_BUILD_CLI "Build command-line interface" ON)
+option(DAM_ENABLE_LLM "Enable LLM-assisted features (requires libcurl)" ON)
 
 # Include CMake modules
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 include(CompilerSettings)
+
+# LLM dependencies (optional)
+if(DAM_ENABLE_LLM)
+    include(Dependencies)
+endif()
 
 # Main library
 add_subdirectory(src/dam)

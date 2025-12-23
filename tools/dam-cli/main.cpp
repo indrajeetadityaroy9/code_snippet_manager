@@ -1,6 +1,11 @@
 #include <dam/dam.hpp>
 #include <dam/util/crc32.hpp>
 
+#ifdef DAM_ENABLE_LLM
+#include "interactive/interactive_editor.hpp"
+#include "llm/claude_client.hpp"
+#endif
+
 #include <algorithm>
 #include <cerrno>
 #include <cstdlib>
@@ -298,6 +303,7 @@ std::string format_time(std::chrono::system_clock::time_point tp) {
 
 int cmd_add(int argc, char* argv[]) {
     bool from_stdin = has_flag(argc, argv, nullptr, "--stdin");
+    bool interactive = has_flag(argc, argv, "-i", "--interactive");
     const char* name = get_option(argc, argv, "-n", "--name");
     const char* lang = get_option(argc, argv, "-l", "--lang");
     const char* desc = get_option(argc, argv, "-d", "--desc");
@@ -306,6 +312,7 @@ int cmd_add(int argc, char* argv[]) {
 
     std::string content;
     std::string snippet_name;
+    std::string detected_lang;
 
     if (from_stdin) {
         content = read_stdin();
@@ -322,6 +329,48 @@ int cmd_add(int argc, char* argv[]) {
         }
         content = read_file(path);
         snippet_name = name ? name : path.filename().string();
+    } else if (interactive) {
+#ifdef DAM_ENABLE_LLM
+        // Try interactive mode with LLM assistance
+        auto client = dam::cli::ClaudeClient::from_environment();
+        if (!client) {
+            std::cerr << "Error: ANTHROPIC_API_KEY environment variable not set.\n";
+            std::cerr << "Interactive mode requires an API key. Use 'dam add -n <name>' for editor mode.\n";
+            return 1;
+        }
+
+        if (!dam::cli::Terminal::is_tty()) {
+            std::cerr << "Error: Interactive mode requires a terminal.\n";
+            return 1;
+        }
+
+        dam::cli::InteractiveEditorConfig config;
+        if (lang) {
+            config.language_hint = lang;
+        }
+
+        dam::cli::InteractiveEditor editor(std::move(*client), config);
+        auto result = editor.run();
+
+        if (!result.accepted) {
+            std::cout << "Cancelled.\n";
+            return 0;
+        }
+
+        content = result.content;
+        detected_lang = result.detected_language;
+
+        if (!name) {
+            std::cerr << "Error: --name is required\n";
+            std::cerr << "Usage: dam add -i -n <name> [-t tag]... [-l lang]\n";
+            return 1;
+        }
+        snippet_name = name;
+#else
+        std::cerr << "Error: Interactive mode not available (compiled without LLM support).\n";
+        std::cerr << "Rebuild with -DDAM_ENABLE_LLM=ON to enable.\n";
+        return 1;
+#endif
     } else {
         // Default: open editor to create snippet
         if (!name) {
@@ -342,11 +391,14 @@ int cmd_add(int argc, char* argv[]) {
     auto store = open_store();
     if (!store) return 1;
 
+    // Use detected language from interactive mode if not explicitly set
+    std::string final_lang = lang ? lang : detected_lang;
+
     auto result = store->add(
         content,
         snippet_name,
         tags,
-        lang ? lang : "",
+        final_lang,
         desc ? desc : ""
     );
 
@@ -698,20 +750,31 @@ Store location: )" << get_default_store_path() << "\n";
 
 Usage:
   dam add -n <name> [-t tag]... [-l lang] [-d desc]
+  dam add -i -n <name> [-t tag]... [-l lang] [-d desc]
   dam add <file> [-n name] [-t tag]... [-l lang] [-d desc]
   dam add --stdin -n <name> [-t tag]...
 
 Options:
-  -n, --name NAME    Snippet name (required, or defaults to filename)
-  -t, --tag TAG      Add tag (repeatable)
-  -l, --lang LANG    Language (auto-detected if omitted)
-  -d, --desc DESC    Description
-  --stdin            Read content from stdin instead of editor
+  -n, --name NAME      Snippet name (required, or defaults to filename)
+  -t, --tag TAG        Add tag (repeatable)
+  -l, --lang LANG      Language (auto-detected if omitted)
+  -d, --desc DESC      Description
+  -i, --interactive    LLM-assisted interactive editor
+  --stdin              Read content from stdin instead of editor
+
+Interactive Mode (-i):
+  Requires ANTHROPIC_API_KEY environment variable.
+  - Type code to get syntax completion suggestions (gray ghost text)
+  - Type natural language like "write a binary search" for code generation
+  - Press Tab to accept suggestions
+  - Press Ctrl+S or Ctrl+D to submit
+  - Press Ctrl+C to cancel
 
 By default, opens $EDITOR to write snippet content.
 
 Examples:
   dam add -n "deploy script" -l bash -t devops
+  dam add -i -n "sort algo" -l python -t algorithms
   dam add script.sh -t bash -t utils
   dam add config.yaml -n "k8s config" -t k8s
   echo 'ls -la' | dam add --stdin -n "list files" -t bash
