@@ -1,7 +1,8 @@
 #pragma once
 
+#include <dam/core_types.hpp>
+
 #include <chrono>
-#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -10,9 +11,9 @@ namespace dam {
 
 namespace fs = std::filesystem;
 
-// Snippet ID type
-using SnippetId = uint64_t;
-constexpr SnippetId INVALID_SNIPPET_ID = 0;
+// Snippet ID is an alias for FileId - both represent document identifiers
+using SnippetId = FileId;
+constexpr SnippetId INVALID_SNIPPET_ID = INVALID_FILE_ID;
 
 /**
  * Metadata for a code snippet stored in the DAM.

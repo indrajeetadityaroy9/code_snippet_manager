@@ -215,14 +215,26 @@ Result<SnippetId> SnippetStore::add(const std::string& content,
     return id;
 }
 
-std::optional<SnippetMetadata> SnippetStore::get(SnippetId id) const {
-    if (!is_open_) return std::nullopt;
-    return snippet_index_->get(id);
+Result<SnippetMetadata> SnippetStore::get(SnippetId id) const {
+    if (!is_open_) {
+        return Error(ErrorCode::STORE_NOT_OPEN, "Store is not open");
+    }
+    auto result = snippet_index_->get(id);
+    if (!result.has_value()) {
+        return Error(ErrorCode::NOT_FOUND, "Snippet not found");
+    }
+    return result.value();
 }
 
-std::optional<SnippetId> SnippetStore::find_by_name(const std::string& name) const {
-    if (!is_open_) return std::nullopt;
-    return snippet_index_->find_by_name(name);
+Result<SnippetId> SnippetStore::find_by_name(const std::string& name) const {
+    if (!is_open_) {
+        return Error(ErrorCode::STORE_NOT_OPEN, "Store is not open");
+    }
+    auto result = snippet_index_->find_by_name(name);
+    if (!result.has_value()) {
+        return Error(ErrorCode::NOT_FOUND, "Snippet not found");
+    }
+    return result.value();
 }
 
 Result<void> SnippetStore::remove(SnippetId id) {
@@ -334,13 +346,17 @@ Result<void> SnippetStore::remove_tag(SnippetId id, const std::string& tag) {
     return Ok();
 }
 
-std::vector<SnippetMetadata> SnippetStore::list_all() const {
-    if (!is_open_) return {};
+Result<std::vector<SnippetMetadata>> SnippetStore::list_all() const {
+    if (!is_open_) {
+        return Error(ErrorCode::STORE_NOT_OPEN, "Store is not open");
+    }
     return snippet_index_->get_all();
 }
 
-std::vector<SnippetMetadata> SnippetStore::find_by_tag(const std::string& tag) const {
-    if (!is_open_) return {};
+Result<std::vector<SnippetMetadata>> SnippetStore::find_by_tag(const std::string& tag) const {
+    if (!is_open_) {
+        return Error(ErrorCode::STORE_NOT_OPEN, "Store is not open");
+    }
 
     std::set<FileId> ids = tag_index_->get_files_for_tag(tag);
     std::vector<SnippetMetadata> result;
@@ -356,8 +372,10 @@ std::vector<SnippetMetadata> SnippetStore::find_by_tag(const std::string& tag) c
     return result;
 }
 
-std::vector<SnippetMetadata> SnippetStore::find_by_language(const std::string& language) const {
-    if (!is_open_) return {};
+Result<std::vector<SnippetMetadata>> SnippetStore::find_by_language(const std::string& language) const {
+    if (!is_open_) {
+        return Error(ErrorCode::STORE_NOT_OPEN, "Store is not open");
+    }
 
     std::vector<SnippetMetadata> result;
     auto all = snippet_index_->get_all();
@@ -371,13 +389,17 @@ std::vector<SnippetMetadata> SnippetStore::find_by_language(const std::string& l
     return result;
 }
 
-std::vector<std::string> SnippetStore::get_all_tags() const {
-    if (!is_open_) return {};
+Result<std::vector<std::string>> SnippetStore::get_all_tags() const {
+    if (!is_open_) {
+        return Error(ErrorCode::STORE_NOT_OPEN, "Store is not open");
+    }
     return tag_index_->get_all_tags();
 }
 
-std::map<std::string, size_t> SnippetStore::get_tag_counts() const {
-    if (!is_open_) return {};
+Result<std::map<std::string, size_t>> SnippetStore::get_tag_counts() const {
+    if (!is_open_) {
+        return Error(ErrorCode::STORE_NOT_OPEN, "Store is not open");
+    }
 
     std::map<std::string, size_t> result;
     auto tags = tag_index_->get_all_tags();
@@ -392,6 +414,87 @@ std::map<std::string, size_t> SnippetStore::get_tag_counts() const {
 size_t SnippetStore::count() const {
     if (!is_open_) return 0;
     return snippet_index_->size();
+}
+
+Result<std::vector<SearchResult>> SnippetStore::search(const std::string& query,
+                                                        size_t max_results) const {
+    if (!is_open_) {
+        return Error(ErrorCode::STORE_NOT_OPEN, "Store is not open");
+    }
+
+    if (query.empty()) {
+        return std::vector<SearchResult>{};
+    }
+
+    // Simple substring search implementation
+    // For more advanced search, consider using SearchRouter internally
+    std::vector<SearchResult> results;
+    auto all_snippets = snippet_index_->get_all();
+
+    std::string query_lower = query;
+    std::transform(query_lower.begin(), query_lower.end(), query_lower.begin(), ::tolower);
+
+    for (const auto& snippet : all_snippets) {
+        // Search in name
+        std::string name_lower = snippet.name;
+        std::transform(name_lower.begin(), name_lower.end(), name_lower.begin(), ::tolower);
+
+        // Search in content
+        std::string content_lower = snippet.content;
+        std::transform(content_lower.begin(), content_lower.end(), content_lower.begin(), ::tolower);
+
+        float score = 0.0f;
+        std::string matched_text;
+
+        // Check name match (higher score)
+        if (name_lower.find(query_lower) != std::string::npos) {
+            score += 1.0f;
+            matched_text = snippet.name;
+        }
+
+        // Check content match
+        size_t pos = content_lower.find(query_lower);
+        if (pos != std::string::npos) {
+            score += 0.5f;
+            // Extract context around match
+            size_t start = (pos > 20) ? pos - 20 : 0;
+            size_t len = std::min(size_t(60), snippet.content.size() - start);
+            if (matched_text.empty()) {
+                matched_text = snippet.content.substr(start, len);
+            }
+        }
+
+        // Check tags match
+        for (const auto& tag : snippet.tags) {
+            std::string tag_lower = tag;
+            std::transform(tag_lower.begin(), tag_lower.end(), tag_lower.begin(), ::tolower);
+            if (tag_lower.find(query_lower) != std::string::npos) {
+                score += 0.3f;
+                break;
+            }
+        }
+
+        if (score > 0.0f) {
+            SearchResult result;
+            result.id = snippet.id;
+            result.score = score;
+            result.matched_text = matched_text;
+            results.push_back(result);
+        }
+    }
+
+    // Sort by score descending
+    std::sort(results.begin(), results.end(),
+              [](const SearchResult& a, const SearchResult& b) {
+                  return a.score > b.score;
+              });
+
+    // Limit results
+    if (results.size() > max_results) {
+        results.resize(max_results);
+    }
+
+    return results;
 }
 
 }  // namespace dam

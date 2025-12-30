@@ -241,8 +241,4 @@ std::vector<SnippetMetadata> SnippetIndex::get_all() const {
     return result;
 }
 
-bool SnippetIndex::exists(SnippetId id) const {
-    return primary_tree_.contains(std::to_string(id));
-}
-
 }  // namespace dam

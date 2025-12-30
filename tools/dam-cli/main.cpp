@@ -3,7 +3,10 @@
 
 #ifdef DAM_ENABLE_LLM
 #include "interactive/interactive_editor.hpp"
-#include "llm/claude_client.hpp"
+#include "interactive/model_picker.hpp"
+#include <dam/llm/error_messages.hpp>
+#include <dam/llm/router.hpp>
+#include <dam/search/search_router.hpp>
 #endif
 
 #include <algorithm>
@@ -267,34 +270,25 @@ std::string truncate(const std::string& s, size_t max_len) {
     return s.substr(0, max_len - 3) + "...";
 }
 
-// Safely parse a snippet ID from string (Bug #19 fix: check for overflow)
+// Safely parse a snippet ID from string
 std::optional<dam::SnippetId> parse_snippet_id(const char* str) {
     if (!str || !*str) return std::nullopt;
 
     char* end;
     errno = 0;
-    long long val = std::strtoll(str, &end, 10);
+    unsigned long long val = std::strtoull(str, &end, 10);
 
     // Check for parse errors
     if (end == str || *end != '\0') {
         return std::nullopt;  // Not a valid number
     }
 
-    // Check for overflow
-    if (errno == ERANGE || val <= 0 || val > static_cast<long long>(UINT64_MAX)) {
+    // Check for overflow or zero (IDs start at 1)
+    if (errno == ERANGE || val == 0) {
         return std::nullopt;
     }
 
     return static_cast<dam::SnippetId>(val);
-}
-
-// Format timestamp
-std::string format_time(std::chrono::system_clock::time_point tp) {
-    auto time = std::chrono::system_clock::to_time_t(tp);
-    std::tm tm = *std::localtime(&time);
-    std::ostringstream ss;
-    ss << std::put_time(&tm, "%Y-%m-%d %H:%M");
-    return ss.str();
 }
 
 // ============================================================================
@@ -332,15 +326,67 @@ int cmd_add(int argc, char* argv[]) {
     } else if (interactive) {
 #ifdef DAM_ENABLE_LLM
         // Try interactive mode with LLM assistance
-        auto client = dam::cli::ClaudeClient::from_environment();
-        if (!client) {
-            std::cerr << "Error: ANTHROPIC_API_KEY environment variable not set.\n";
-            std::cerr << "Interactive mode requires an API key. Use 'dam add -n <name>' for editor mode.\n";
+        if (!dam::cli::Terminal::is_tty()) {
+            std::cerr << "Error: Interactive mode requires a terminal.\n";
             return 1;
         }
 
-        if (!dam::cli::Terminal::is_tty()) {
-            std::cerr << "Error: Interactive mode requires a terminal.\n";
+        if (!name) {
+            std::cerr << "Error: --name is required\n";
+            std::cerr << "Usage: dam add -i -n <name> [-t tag]... [-l lang]\n";
+            return 1;
+        }
+        snippet_name = name;
+
+        // Try to create LLM router with discovery
+        auto discovery_result = dam::llm::LLMFactory::create_with_discovery();
+
+        std::unique_ptr<dam::llm::LLMRouter> router;
+
+        if (!discovery_result.ok()) {
+            auto error_code = discovery_result.error_code();
+
+            if (error_code == dam::ErrorCode::OLLAMA_NOT_RUNNING) {
+                std::cerr << dam::llm::ErrorMessages::ollama_not_running() << "\n";
+                return 1;
+            }
+
+            if (error_code == dam::ErrorCode::MODEL_NOT_FOUND) {
+                std::cerr << dam::llm::ErrorMessages::no_models_installed() << "\n";
+                return 1;
+            }
+
+            // Generic error
+            std::cerr << "Error: " << discovery_result.error().message() << "\n";
+            std::cerr << dam::llm::ErrorMessages::setup_help() << "\n";
+            return 1;
+        }
+
+        auto& create_result = discovery_result.value();
+
+        // If multiple models and no router yet, show model picker
+        if (create_result.requires_model_selection && !create_result.router) {
+            dam::cli::ModelPicker picker(create_result.discovery.available_models);
+            auto selected = picker.pick();
+
+            if (!selected) {
+                std::cout << "Cancelled.\n";
+                return 0;
+            }
+
+            // Create router with selected model
+            auto router_result = dam::llm::LLMFactory::create_with_ollama_model(*selected);
+            if (!router_result.ok()) {
+                std::cerr << "Error: " << router_result.error().message() << "\n";
+                return 1;
+            }
+            router = std::move(router_result.value());
+            std::cout << "Using model: " << *selected << "\n";
+        } else if (create_result.router) {
+            // Auto-selected model (single or recommended)
+            router = std::move(create_result.router);
+        } else {
+            std::cerr << "Error: No LLM model available.\n";
             return 1;
         }
 
@@ -349,7 +395,7 @@ int cmd_add(int argc, char* argv[]) {
             config.language_hint = lang;
         }
 
-        dam::cli::InteractiveEditor editor(std::move(*client), config);
+        dam::cli::InteractiveEditor editor(std::move(router), config);
         auto result = editor.run();
 
         if (!result.accepted) {
@@ -359,13 +405,6 @@ int cmd_add(int argc, char* argv[]) {
 
         content = result.content;
         detected_lang = result.detected_language;
-
-        if (!name) {
-            std::cerr << "Error: --name is required\n";
-            std::cerr << "Usage: dam add -i -n <name> [-t tag]... [-l lang]\n";
-            return 1;
-        }
-        snippet_name = name;
 #else
         std::cerr << "Error: Interactive mode not available (compiled without LLM support).\n";
         std::cerr << "Rebuild with -DDAM_ENABLE_LLM=ON to enable.\n";
@@ -423,44 +462,45 @@ int cmd_get(int argc, char* argv[]) {
     auto store = open_store();
     if (!store) return 1;
 
-    std::optional<dam::SnippetMetadata> snippet;
+    dam::Result<dam::SnippetMetadata> snippet_result = dam::Error(dam::ErrorCode::NOT_FOUND);
 
     // Try as ID first
     auto parsed_id = parse_snippet_id(id_or_name);
     if (parsed_id.has_value()) {
-        snippet = store->get(*parsed_id);
+        snippet_result = store->get(*parsed_id);
     }
 
     // Try as name
-    if (!snippet.has_value()) {
+    if (!snippet_result.ok()) {
         auto found_id = store->find_by_name(id_or_name);
-        if (found_id.has_value()) {
-            snippet = store->get(*found_id);
+        if (found_id.ok()) {
+            snippet_result = store->get(found_id.value());
         }
     }
 
-    if (!snippet.has_value()) {
+    if (!snippet_result.ok()) {
         std::cerr << "Error: Snippet not found: " << id_or_name << "\n";
         return 1;
     }
 
+    auto& snippet = snippet_result.value();
     if (raw) {
-        std::cout << snippet->content;
+        std::cout << snippet.content;
     } else {
-        std::cout << "# " << snippet->name << " [" << snippet->language << "]\n";
-        if (!snippet->description.empty()) {
-            std::cout << "# " << snippet->description << "\n";
+        std::cout << "# " << snippet.name << " [" << snippet.language << "]\n";
+        if (!snippet.description.empty()) {
+            std::cout << "# " << snippet.description << "\n";
         }
-        if (!snippet->tags.empty()) {
+        if (!snippet.tags.empty()) {
             std::cout << "# Tags: ";
-            for (size_t i = 0; i < snippet->tags.size(); ++i) {
+            for (size_t i = 0; i < snippet.tags.size(); ++i) {
                 if (i > 0) std::cout << ", ";
-                std::cout << snippet->tags[i];
+                std::cout << snippet.tags[i];
             }
             std::cout << "\n";
         }
-        std::cout << "\n" << snippet->content;
-        if (!snippet->content.empty() && snippet->content.back() != '\n') {
+        std::cout << "\n" << snippet.content;
+        if (!snippet.content.empty() && snippet.content.back() != '\n') {
             std::cout << "\n";
         }
     }
@@ -479,49 +519,51 @@ int cmd_edit(int argc, char* argv[]) {
     auto store = open_store();
     if (!store) return 1;
 
-    std::optional<dam::SnippetMetadata> snippet;
+    dam::Result<dam::SnippetMetadata> snippet_result = dam::Error(dam::ErrorCode::NOT_FOUND);
     dam::SnippetId id = dam::INVALID_SNIPPET_ID;
 
     // Try as ID first
     auto parsed_id = parse_snippet_id(id_or_name);
     if (parsed_id.has_value()) {
         id = *parsed_id;
-        snippet = store->get(id);
+        snippet_result = store->get(id);
     }
 
     // Try as name
-    if (!snippet.has_value()) {
+    if (!snippet_result.ok()) {
         auto found_id = store->find_by_name(id_or_name);
-        if (found_id.has_value()) {
-            id = *found_id;
-            snippet = store->get(id);
+        if (found_id.ok()) {
+            id = found_id.value();
+            snippet_result = store->get(id);
         }
     }
 
-    if (!snippet.has_value()) {
+    if (!snippet_result.ok()) {
         std::cerr << "Error: Snippet not found: " << id_or_name << "\n";
         return 1;
     }
 
+    auto& snippet = snippet_result.value();
+
     // Open editor with current content
-    std::string extension = get_extension_for_lang(snippet->language);
-    auto [success, new_content] = open_editor(snippet->content, extension);
+    std::string extension = get_extension_for_lang(snippet.language);
+    auto [success, new_content] = open_editor(snippet.content, extension);
 
     if (!success) {
         return 0;  // User cancelled
     }
 
     // Check if content actually changed
-    if (new_content == snippet->content) {
+    if (new_content == snippet.content) {
         std::cout << "No changes made.\n";
         return 0;
     }
 
     // Update snippet - need to remove and re-add since we store content inline
-    auto tags = snippet->tags;
-    auto name = snippet->name;
-    auto lang = snippet->language;
-    auto desc = snippet->description;
+    auto tags = snippet.tags;
+    auto name = snippet.name;
+    auto lang = snippet.language;
+    auto desc = snippet.description;
 
     auto remove_result = store->remove(id);
     if (!remove_result.ok()) {
@@ -540,24 +582,22 @@ int cmd_edit(int argc, char* argv[]) {
 }
 
 int cmd_list(int argc, char* argv[]) {
-    const char* tag = get_option(argc, argv, "-t", "--tag");
-    const char* lang = get_option(argc, argv, "-l", "--lang");
+    (void)argc;
+    (void)argv;
 
     auto store = open_store();
     if (!store) return 1;
 
-    std::vector<dam::SnippetMetadata> snippets;
-
-    if (tag) {
-        snippets = store->find_by_tag(tag);
-    } else if (lang) {
-        snippets = store->find_by_language(lang);
-    } else {
-        snippets = store->list_all();
+    auto snippets_result = store->list_all();
+    if (!snippets_result.ok()) {
+        std::cerr << "Error: " << snippets_result.error().to_string() << "\n";
+        return 1;
     }
 
+    auto& snippets = snippets_result.value();
     if (snippets.empty()) {
         std::cout << "No snippets found.\n";
+        std::cout << "Use 'dam add' to create your first snippet.\n";
         return 0;
     }
 
@@ -610,8 +650,8 @@ int cmd_rm(int argc, char* argv[]) {
         id = *parsed_id;
     } else {
         auto found_id = store->find_by_name(id_or_name);
-        if (found_id.has_value()) {
-            id = *found_id;
+        if (found_id.ok()) {
+            id = found_id.value();
         }
     }
 
@@ -620,14 +660,15 @@ int cmd_rm(int argc, char* argv[]) {
         return 1;
     }
 
-    auto snippet = store->get(id);
-    if (!snippet.has_value()) {
+    auto snippet_result = store->get(id);
+    if (!snippet_result.ok()) {
         std::cerr << "Error: Snippet not found\n";
         return 1;
     }
 
+    auto& snippet = snippet_result.value();
     if (!force) {
-        std::cout << "Remove snippet " << id << " (" << snippet->name << ")? [y/N] ";
+        std::cout << "Remove snippet " << id << " (" << snippet.name << ")? [y/N] ";
         std::string response;
         std::getline(std::cin, response);
         if (response != "y" && response != "Y") {
@@ -646,35 +687,40 @@ int cmd_rm(int argc, char* argv[]) {
     return 0;
 }
 
-int cmd_tags(int argc, char* argv[]) {
-    (void)argc;
-    (void)argv;
-
+int cmd_tag(int argc, char* argv[]) {
     auto store = open_store();
     if (!store) return 1;
 
-    auto counts = store->get_tag_counts();
+    // No arguments: list all tags with counts
+    if (argc < 1) {
+        auto counts_result = store->get_tag_counts();
+        if (!counts_result.ok()) {
+            std::cerr << "Error: " << counts_result.error().to_string() << "\n";
+            return 1;
+        }
 
-    if (counts.empty()) {
-        std::cout << "No tags found.\n";
+        auto& counts = counts_result.value();
+        if (counts.empty()) {
+            std::cout << "No tags found.\n";
+            return 0;
+        }
+
+        // Sort by count (descending)
+        std::vector<std::pair<std::string, size_t>> sorted(counts.begin(), counts.end());
+        std::sort(sorted.begin(), sorted.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+
+        std::cout << "Tags:\n";
+        for (const auto& [tag, count] : sorted) {
+            std::cout << "  " << tag << " (" << count << ")\n";
+        }
         return 0;
     }
 
-    // Sort by count (descending)
-    std::vector<std::pair<std::string, size_t>> sorted(counts.begin(), counts.end());
-    std::sort(sorted.begin(), sorted.end(),
-              [](const auto& a, const auto& b) { return a.second > b.second; });
-
-    for (const auto& [tag, count] : sorted) {
-        std::cout << tag << " (" << count << ")\n";
-    }
-
-    return 0;
-}
-
-int cmd_tag(int argc, char* argv[]) {
+    // With arguments: modify tags on a snippet
     if (argc < 2) {
-        std::cerr << "Usage: dam tag <id> <+tag|-tag>...\n";
+        std::cerr << "Usage: dam tag              # list all tags\n";
+        std::cerr << "       dam tag <id> +tag... # add/remove tags\n";
         std::cerr << "  +tag  Add tag\n";
         std::cerr << "  -tag  Remove tag\n";
         return 1;
@@ -682,19 +728,21 @@ int cmd_tag(int argc, char* argv[]) {
 
     const char* id_str = argv[0];
 
-    auto store = open_store();
-    if (!store) return 1;
-
-    // Parse ID
+    // Parse ID or name
+    dam::SnippetId id = dam::INVALID_SNIPPET_ID;
     auto parsed_id = parse_snippet_id(id_str);
-    if (!parsed_id.has_value()) {
-        std::cerr << "Error: Invalid snippet ID: " << id_str << "\n";
-        return 1;
+    if (parsed_id.has_value()) {
+        id = *parsed_id;
+    } else {
+        // Try as name
+        auto found_id = store->find_by_name(id_str);
+        if (found_id.ok()) {
+            id = found_id.value();
+        }
     }
-    dam::SnippetId id = *parsed_id;
 
-    if (!store->get(id).has_value()) {
-        std::cerr << "Error: Snippet not found: " << id << "\n";
+    if (id == dam::INVALID_SNIPPET_ID || !store->get(id).ok()) {
+        std::cerr << "Error: Snippet not found: " << id_str << "\n";
         return 1;
     }
 
@@ -723,6 +771,179 @@ int cmd_tag(int argc, char* argv[]) {
     return 0;
 }
 
+int cmd_search(int argc, char* argv[]) {
+    // Parse options
+    const char* max_results_str = get_option(argc, argv, "-n", "--max");
+    const char* filter_tag = get_option(argc, argv, "-t", "--tag");
+    const char* filter_lang = get_option(argc, argv, "-l", "--lang");
+    size_t max_results = max_results_str ? std::stoul(max_results_str) : 20;
+
+    // Collect query from all non-option arguments
+    std::string query;
+    for (int i = 0; i < argc; ++i) {
+        const char* arg = argv[i];
+        // Skip flags and options
+        if (arg[0] == '-') {
+            // Skip option values (like -n 10 or -t bash)
+            if ((std::strcmp(arg, "-n") == 0 || std::strcmp(arg, "--max") == 0 ||
+                 std::strcmp(arg, "-t") == 0 || std::strcmp(arg, "--tag") == 0 ||
+                 std::strcmp(arg, "-l") == 0 || std::strcmp(arg, "--lang") == 0) &&
+                i + 1 < argc) {
+                ++i;  // Skip the value
+            }
+            continue;
+        }
+        if (!query.empty()) query += " ";
+        query += arg;
+    }
+
+    // If no query but filters provided, list all and filter
+    bool query_empty = query.empty();
+    if (query_empty && !filter_tag && !filter_lang) {
+        std::cerr << "Usage: dam search <query> [-t tag] [-l lang] [-n max]\n";
+        std::cerr << "       dam search -t <tag>     # filter by tag\n";
+        std::cerr << "       dam search -l <lang>    # filter by language\n";
+        return 1;
+    }
+
+    auto store = open_store();
+    if (!store) return 1;
+
+    // Use store's built-in search for content queries
+    if (!query_empty) {
+        auto search_result = store->search(query, max_results);
+        if (search_result.ok()) {
+            auto results = search_result.value();
+
+            // Apply metadata filters
+            if (filter_tag || filter_lang) {
+                results.erase(
+                    std::remove_if(results.begin(), results.end(),
+                        [&store, filter_tag, filter_lang](const dam::SearchResult& r) {
+                            auto snippet_result = store->get(r.id);
+                            if (!snippet_result.ok()) return true;
+
+                            auto& snippet = snippet_result.value();
+                            if (filter_tag) {
+                                bool has_tag = std::find(snippet.tags.begin(), snippet.tags.end(),
+                                                         filter_tag) != snippet.tags.end();
+                                if (!has_tag) return true;
+                            }
+                            if (filter_lang) {
+                                if (snippet.language != filter_lang) return true;
+                            }
+                            return false;
+                        }),
+                    results.end());
+            }
+
+            if (results.empty()) {
+                std::cout << "No matches found";
+                std::cout << " for: " << query;
+                if (filter_tag) std::cout << " [tag:" << filter_tag << "]";
+                if (filter_lang) std::cout << " [lang:" << filter_lang << "]";
+                std::cout << "\n";
+                return 0;
+            }
+
+            // Print results header
+            std::cout << "Search results for: " << query;
+            if (filter_tag) std::cout << " [tag:" << filter_tag << "]";
+            if (filter_lang) std::cout << " [lang:" << filter_lang << "]";
+            std::cout << "\n";
+            std::cout << std::string(70, '-') << "\n";
+            std::cout << std::left
+                      << std::setw(6) << "ID"
+                      << std::setw(25) << "NAME"
+                      << std::setw(12) << "LANG"
+                      << "TAGS\n";
+            std::cout << std::string(70, '-') << "\n";
+
+            // Print results
+            size_t count = 0;
+            for (const auto& r : results) {
+                if (count >= max_results) break;
+                auto snippet_result = store->get(r.id);
+                if (!snippet_result.ok()) continue;
+
+                auto& snippet = snippet_result.value();
+                std::string tags_str;
+                for (size_t i = 0; i < snippet.tags.size() && i < 3; ++i) {
+                    if (i > 0) tags_str += ", ";
+                    tags_str += snippet.tags[i];
+                }
+
+                std::cout << std::left
+                          << std::setw(6) << r.id
+                          << std::setw(25) << truncate(snippet.name, 24)
+                          << std::setw(12) << truncate(snippet.language, 11)
+                          << tags_str << "\n";
+                ++count;
+            }
+
+            std::cout << "\n" << count << " result(s)\n";
+            return 0;
+        }
+    }
+
+    // Filter-only queries (no text search, just list by filter)
+    std::vector<dam::SnippetMetadata> snippets;
+
+    if (filter_tag) {
+        auto result = store->find_by_tag(filter_tag);
+        if (result.ok()) snippets = result.value();
+    } else if (filter_lang) {
+        auto result = store->find_by_language(filter_lang);
+        if (result.ok()) snippets = result.value();
+    } else {
+        // No query and no filters - list all
+        auto result = store->list_all();
+        if (result.ok()) snippets = result.value();
+    }
+
+    if (snippets.empty()) {
+        std::cout << "No snippets found";
+        if (filter_tag) std::cout << " [tag:" << filter_tag << "]";
+        if (filter_lang) std::cout << " [lang:" << filter_lang << "]";
+        std::cout << ".\n";
+        return 0;
+    }
+
+    // Limit results
+    if (snippets.size() > max_results) {
+        snippets.resize(max_results);
+    }
+
+    std::cout << "Snippets";
+    if (filter_tag) std::cout << " [tag:" << filter_tag << "]";
+    if (filter_lang) std::cout << " [lang:" << filter_lang << "]";
+    std::cout << "\n";
+    std::cout << std::string(70, '-') << "\n";
+    std::cout << std::left
+              << std::setw(6) << "ID"
+              << std::setw(25) << "NAME"
+              << std::setw(12) << "LANG"
+              << "TAGS\n";
+    std::cout << std::string(70, '-') << "\n";
+
+    for (const auto& s : snippets) {
+        std::string tags_str;
+        for (size_t i = 0; i < s.tags.size() && i < 3; ++i) {
+            if (i > 0) tags_str += ", ";
+            tags_str += s.tags[i];
+        }
+
+        std::cout << std::left
+                  << std::setw(6) << s.id
+                  << std::setw(25) << truncate(s.name, 24)
+                  << std::setw(12) << truncate(s.language, 11)
+                  << tags_str << "\n";
+    }
+
+    std::cout << "\n" << snippets.size() << " snippet(s)\n";
+    return 0;
+}
+
 int show_help(const char* command) {
     if (command == nullptr || command[0] == '\0') {
         std::cout << R"(DAM - Developer Asset Manager
@@ -733,10 +954,10 @@ Commands:
   add      Add a new snippet
   get      Retrieve a snippet
   edit     Edit an existing snippet
-  list     List snippets
+  list     List all snippets
+  search   Search and filter snippets
   rm       Remove a snippet
-  tags     List all tags
-  tag      Add/remove tags from a snippet
+  tag      List tags or modify snippet tags
   help     Show help
 
 Use 'dam help <command>' for more information about a command.
@@ -763,12 +984,22 @@ Options:
   --stdin              Read content from stdin instead of editor
 
 Interactive Mode (-i):
-  Requires ANTHROPIC_API_KEY environment variable.
+  Requires Ollama running locally with at least one model installed.
+
+  Setup:
+    1. Install Ollama: brew install ollama (macOS)
+    2. Start server: ollama serve
+    3. Pull a model: ollama pull codellama:7b-instruct
+
+  Features:
   - Type code to get syntax completion suggestions (gray ghost text)
   - Type natural language like "write a binary search" for code generation
   - Press Tab to accept suggestions
   - Press Ctrl+S or Ctrl+D to submit
   - Press Ctrl+C to cancel
+
+  If multiple models are installed, you'll be prompted to select one.
+  Override with: DAM_OLLAMA_MODEL=<model> dam add -i ...
 
 By default, opens $EDITOR to write snippet content.
 
@@ -808,18 +1039,15 @@ Examples:
   dam edit "my script"
 )";
     } else if (std::strcmp(command, "list") == 0) {
-        std::cout << R"(List snippets
+        std::cout << R"(List all snippets
 
-Usage: dam list [-t tag] [-l lang]
+Usage: dam list
 
-Options:
-  -t, --tag TAG     Filter by tag
-  -l, --lang LANG   Filter by language
+Shows all snippets in a table with ID, name, language, tags, and size.
+Use 'dam search' with filters to find specific snippets.
 
 Examples:
   dam list
-  dam list -t bash
-  dam list -l python
 )";
     } else if (std::strcmp(command, "rm") == 0) {
         std::cout << R"(Remove a snippet
@@ -833,25 +1061,45 @@ Examples:
   dam rm 1
   dam rm "old script" -f
 )";
-    } else if (std::strcmp(command, "tags") == 0) {
-        std::cout << R"(List all tags with counts
-
-Usage: dam tags
-
-Shows all unique tags and the number of snippets with each tag.
-)";
     } else if (std::strcmp(command, "tag") == 0) {
-        std::cout << R"(Add or remove tags from a snippet
+        std::cout << R"(List tags or modify snippet tags
 
-Usage: dam tag <id> <+tag|-tag>...
+Usage:
+  dam tag                       # list all tags with counts
+  dam tag <id|name> +tag -tag   # add/remove tags from snippet
 
 Arguments:
-  +tag    Add tag
-  -tag    Remove tag
+  +tag    Add tag to snippet
+  -tag    Remove tag from snippet
 
 Examples:
-  dam tag 1 +production -draft
-  dam tag 1 +important +urgent
+  dam tag                       # list all tags
+  dam tag 1 +production -draft  # modify tags on snippet 1
+  dam tag "my script" +urgent   # add tag by snippet name
+)";
+    } else if (std::strcmp(command, "search") == 0) {
+        std::cout << R"(Search and filter snippets
+
+Usage:
+  dam search <query>             # search by content
+  dam search -t <tag>            # filter by tag
+  dam search -l <lang>           # filter by language
+  dam search <query> -t <tag>    # combined search and filter
+
+Options:
+  -t, --tag TAG    Filter results by tag
+  -l, --lang LANG  Filter results by language
+  -n, --max N      Maximum number of results (default: 20)
+
+Search uses intelligent auto-routing to find the best matches using all
+available indexes (keyword, fuzzy, semantic) automatically.
+
+Examples:
+  dam search "binary search"         # search content
+  dam search -t bash                 # filter by tag
+  dam search -l python               # filter by language
+  dam search "sort" -t algorithms    # search + filter
+  dam search "how to parse json"     # natural language query
 )";
     } else {
         std::cerr << "Unknown command: " << command << "\n";
@@ -876,14 +1124,14 @@ int main(int argc, char* argv[]) {
 
     std::string cmd = argv[1];
 
-    if (cmd == "add")   return cmd_add(argc - 2, argv + 2);
-    if (cmd == "get")   return cmd_get(argc - 2, argv + 2);
-    if (cmd == "edit")  return cmd_edit(argc - 2, argv + 2);
-    if (cmd == "list")  return cmd_list(argc - 2, argv + 2);
-    if (cmd == "rm")    return cmd_rm(argc - 2, argv + 2);
-    if (cmd == "tags")  return cmd_tags(argc - 2, argv + 2);
-    if (cmd == "tag")   return cmd_tag(argc - 2, argv + 2);
-    if (cmd == "help")  return show_help(argc > 2 ? argv[2] : nullptr);
+    if (cmd == "add")    return cmd_add(argc - 2, argv + 2);
+    if (cmd == "get")    return cmd_get(argc - 2, argv + 2);
+    if (cmd == "edit")   return cmd_edit(argc - 2, argv + 2);
+    if (cmd == "list")   return cmd_list(argc - 2, argv + 2);
+    if (cmd == "search") return cmd_search(argc - 2, argv + 2);
+    if (cmd == "rm")     return cmd_rm(argc - 2, argv + 2);
+    if (cmd == "tag")    return cmd_tag(argc - 2, argv + 2);
+    if (cmd == "help")   return show_help(argc > 2 ? argv[2] : nullptr);
 
     std::cerr << "Unknown command: " << cmd << "\n";
     std::cerr << "Run 'dam help' for available commands.\n";

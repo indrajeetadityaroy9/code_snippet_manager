@@ -9,18 +9,26 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Export compile commands for IDE support
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Build options
-option(DAM_BUILD_TESTS "Build unit and integration tests" ON)
-option(DAM_BUILD_CLI "Build command-line interface" ON)
-option(DAM_ENABLE_LLM "Enable LLM-assisted features (requires libcurl)" ON)
-
 # Include CMake modules
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+
+# Feature configuration (defines all build options)
+include(Features)
 include(CompilerSettings)
 
-# LLM dependencies (optional)
+# LLM dependencies (conditional)
 if(DAM_ENABLE_LLM)
     include(Dependencies)
+
+    # llama.cpp integration (optional)
+    if(DAM_ENABLE_LLAMACPP)
+        include(LlamaCpp)
+    endif()
+
+    # hnswlib for vector search (optional)
+    if(DAM_ENABLE_VECTOR_SEARCH)
+        include(Hnswlib)
+    endif()
 endif()
 
 # Main library
@@ -47,3 +55,6 @@ install(TARGETS dam
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+# Print configuration summary
+dam_print_feature_summary()

@@ -61,12 +61,12 @@ TEST_F(SnippetStoreTest, GetSnippet) {
     SnippetId id = add_result.value();
 
     auto snippet = store->get(id);
-    ASSERT_TRUE(snippet.has_value());
-    EXPECT_EQ(snippet->name, "py-hello");
-    EXPECT_EQ(snippet->content, "print('hello')");
-    EXPECT_EQ(snippet->language, "python");
-    ASSERT_EQ(snippet->tags.size(), 1);
-    EXPECT_EQ(snippet->tags[0], "python");
+    ASSERT_TRUE(snippet.ok());
+    EXPECT_EQ(snippet.value().name, "py-hello");
+    EXPECT_EQ(snippet.value().content, "print('hello')");
+    EXPECT_EQ(snippet.value().language, "python");
+    ASSERT_EQ(snippet.value().tags.size(), 1);
+    EXPECT_EQ(snippet.value().tags[0], "python");
 }
 
 TEST_F(SnippetStoreTest, FindByName) {
@@ -76,11 +76,11 @@ TEST_F(SnippetStoreTest, FindByName) {
     store->add("content2", "snippet-two", {});
 
     auto id = store->find_by_name("snippet-two");
-    ASSERT_TRUE(id.has_value());
+    ASSERT_TRUE(id.ok());
 
-    auto snippet = store->get(*id);
-    ASSERT_TRUE(snippet.has_value());
-    EXPECT_EQ(snippet->content, "content2");
+    auto snippet = store->get(id.value());
+    ASSERT_TRUE(snippet.ok());
+    EXPECT_EQ(snippet.value().content, "content2");
 }
 
 TEST_F(SnippetStoreTest, RemoveSnippet) {
@@ -96,7 +96,7 @@ TEST_F(SnippetStoreTest, RemoveSnippet) {
     ASSERT_TRUE(remove_result.ok());
 
     EXPECT_EQ(store->count(), 0);
-    EXPECT_FALSE(store->get(id).has_value());
+    EXPECT_FALSE(store->get(id).ok());
 }
 
 // ============================================================================
@@ -114,8 +114,8 @@ TEST_F(SnippetStoreTest, AddTag) {
     ASSERT_TRUE(tag_result.ok());
 
     auto snippet = store->get(id);
-    ASSERT_TRUE(snippet.has_value());
-    EXPECT_EQ(snippet->tags.size(), 2);
+    ASSERT_TRUE(snippet.ok());
+    EXPECT_EQ(snippet.value().tags.size(), 2);
 }
 
 TEST_F(SnippetStoreTest, RemoveTag) {
@@ -129,9 +129,9 @@ TEST_F(SnippetStoreTest, RemoveTag) {
     ASSERT_TRUE(tag_result.ok());
 
     auto snippet = store->get(id);
-    ASSERT_TRUE(snippet.has_value());
-    ASSERT_EQ(snippet->tags.size(), 1);
-    EXPECT_EQ(snippet->tags[0], "tag2");
+    ASSERT_TRUE(snippet.ok());
+    ASSERT_EQ(snippet.value().tags.size(), 1);
+    EXPECT_EQ(snippet.value().tags[0], "tag2");
 }
 
 TEST_F(SnippetStoreTest, GetAllTags) {
@@ -142,7 +142,8 @@ TEST_F(SnippetStoreTest, GetAllTags) {
     store->add("c3", "s3", {"bash", "api"});
 
     auto tags = store->get_all_tags();
-    EXPECT_EQ(tags.size(), 4);  // bash, utils, python, api
+    ASSERT_TRUE(tags.ok());
+    EXPECT_EQ(tags.value().size(), 4);  // bash, utils, python, api
 }
 
 TEST_F(SnippetStoreTest, GetTagCounts) {
@@ -153,9 +154,10 @@ TEST_F(SnippetStoreTest, GetTagCounts) {
     store->add("c3", "s3", {"bash"});
 
     auto counts = store->get_tag_counts();
-    EXPECT_EQ(counts["bash"], 2);
-    EXPECT_EQ(counts["utils"], 2);
-    EXPECT_EQ(counts["python"], 1);
+    ASSERT_TRUE(counts.ok());
+    EXPECT_EQ(counts.value()["bash"], 2);
+    EXPECT_EQ(counts.value()["utils"], 2);
+    EXPECT_EQ(counts.value()["python"], 1);
 }
 
 // ============================================================================
@@ -170,7 +172,8 @@ TEST_F(SnippetStoreTest, ListAll) {
     store->add("c3", "s3", {});
 
     auto all = store->list_all();
-    EXPECT_EQ(all.size(), 3);
+    ASSERT_TRUE(all.ok());
+    EXPECT_EQ(all.value().size(), 3);
 }
 
 TEST_F(SnippetStoreTest, FindByTag) {
@@ -181,10 +184,12 @@ TEST_F(SnippetStoreTest, FindByTag) {
     store->add("another bash", "bash2", {"bash", "utils"});
 
     auto bash_snippets = store->find_by_tag("bash");
-    EXPECT_EQ(bash_snippets.size(), 2);
+    ASSERT_TRUE(bash_snippets.ok());
+    EXPECT_EQ(bash_snippets.value().size(), 2);
 
     auto python_snippets = store->find_by_tag("python");
-    EXPECT_EQ(python_snippets.size(), 1);
+    ASSERT_TRUE(python_snippets.ok());
+    EXPECT_EQ(python_snippets.value().size(), 1);
 }
 
 TEST_F(SnippetStoreTest, FindByLanguage) {
@@ -195,10 +200,12 @@ TEST_F(SnippetStoreTest, FindByLanguage) {
     store->add("c3", "s3", {}, "bash");
 
     auto bash_snippets = store->find_by_language("bash");
-    EXPECT_EQ(bash_snippets.size(), 2);
+    ASSERT_TRUE(bash_snippets.ok());
+    EXPECT_EQ(bash_snippets.value().size(), 2);
 
     auto python_snippets = store->find_by_language("python");
-    EXPECT_EQ(python_snippets.size(), 1);
+    ASSERT_TRUE(python_snippets.ok());
+    EXPECT_EQ(python_snippets.value().size(), 1);
 }
 
 // ============================================================================
@@ -212,8 +219,8 @@ TEST_F(SnippetStoreTest, LanguageDetectionFromShebang) {
     ASSERT_TRUE(result.ok());
 
     auto snippet = store->get(result.value());
-    ASSERT_TRUE(snippet.has_value());
-    EXPECT_EQ(snippet->language, "bash");
+    ASSERT_TRUE(snippet.ok());
+    EXPECT_EQ(snippet.value().language, "bash");
 }
 
 TEST_F(SnippetStoreTest, LanguageDetectionFromEnvShebang) {
@@ -223,8 +230,8 @@ TEST_F(SnippetStoreTest, LanguageDetectionFromEnvShebang) {
     ASSERT_TRUE(result.ok());
 
     auto snippet = store->get(result.value());
-    ASSERT_TRUE(snippet.has_value());
-    EXPECT_EQ(snippet->language, "python");
+    ASSERT_TRUE(snippet.ok());
+    EXPECT_EQ(snippet.value().language, "python");
 }
 
 TEST_F(SnippetStoreTest, LanguageDetectionFromFilename) {
@@ -234,8 +241,8 @@ TEST_F(SnippetStoreTest, LanguageDetectionFromFilename) {
     ASSERT_TRUE(result.ok());
 
     auto snippet = store->get(result.value());
-    ASSERT_TRUE(snippet.has_value());
-    EXPECT_EQ(snippet->language, "javascript");
+    ASSERT_TRUE(snippet.ok());
+    EXPECT_EQ(snippet.value().language, "javascript");
 }
 
 TEST_F(SnippetStoreTest, ExplicitLanguageOverridesDetection) {
@@ -246,8 +253,8 @@ TEST_F(SnippetStoreTest, ExplicitLanguageOverridesDetection) {
     ASSERT_TRUE(result.ok());
 
     auto snippet = store->get(result.value());
-    ASSERT_TRUE(snippet.has_value());
-    EXPECT_EQ(snippet->language, "python");
+    ASSERT_TRUE(snippet.ok());
+    EXPECT_EQ(snippet.value().language, "python");
 }
 
 // ============================================================================
@@ -275,13 +282,13 @@ TEST_F(SnippetStoreTest, PersistenceAcrossReopen) {
         EXPECT_EQ(store->count(), 2);
 
         auto s1 = store->get(id1);
-        ASSERT_TRUE(s1.has_value());
-        EXPECT_EQ(s1->name, "snippet1");
-        EXPECT_EQ(s1->content, "content1");
+        ASSERT_TRUE(s1.ok());
+        EXPECT_EQ(s1.value().name, "snippet1");
+        EXPECT_EQ(s1.value().content, "content1");
 
         auto s2 = store->get(id2);
-        ASSERT_TRUE(s2.has_value());
-        EXPECT_EQ(s2->name, "snippet2");
+        ASSERT_TRUE(s2.ok());
+        EXPECT_EQ(s2.value().name, "snippet2");
     }
 }
 
@@ -300,11 +307,12 @@ TEST_F(SnippetStoreTest, TagsPersistAcrossReopen) {
     {
         auto store = open_store();
         auto snippet = store->get(id);
-        ASSERT_TRUE(snippet.has_value());
-        EXPECT_EQ(snippet->tags.size(), 2);
+        ASSERT_TRUE(snippet.ok());
+        EXPECT_EQ(snippet.value().tags.size(), 2);
 
         auto tags = store->get_all_tags();
-        EXPECT_EQ(tags.size(), 2);
+        ASSERT_TRUE(tags.ok());
+        EXPECT_EQ(tags.value().size(), 2);
     }
 }
 

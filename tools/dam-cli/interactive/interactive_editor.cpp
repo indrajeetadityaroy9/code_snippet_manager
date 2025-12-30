@@ -7,16 +7,17 @@
 
 namespace dam::cli {
 
-InteractiveEditor::InteractiveEditor(ClaudeClient client,
+InteractiveEditor::InteractiveEditor(std::unique_ptr<dam::llm::LLMRouter> router,
                                      InteractiveEditorConfig config)
-    : client_(std::move(client))
+    : router_(std::move(router))
     , config_(std::move(config))
     , debouncer_(config_.debounce_ms) {
     lines_.push_back("");
 }
 
 bool InteractiveEditor::is_available() const {
-    return Terminal::is_tty() && client_.is_available();
+    return Terminal::is_tty() && router_ &&
+           (router_->has_local_provider() || router_->has_cloud_provider());
 }
 
 void InteractiveEditor::set_language(const std::string& language) {
@@ -253,19 +254,6 @@ void InteractiveEditor::delete_char_forward() {
     }
 }
 
-void InteractiveEditor::delete_line() {
-    if (lines_.size() > 1) {
-        lines_.erase(lines_.begin() + cursor_row_);
-        if (cursor_row_ >= static_cast<int>(lines_.size())) {
-            cursor_row_ = static_cast<int>(lines_.size()) - 1;
-        }
-        cursor_col_ = std::min(cursor_col_, static_cast<int>(lines_[cursor_row_].length()));
-    } else {
-        lines_[0].clear();
-        cursor_col_ = 0;
-    }
-}
-
 void InteractiveEditor::move_cursor_left() {
     if (cursor_col_ > 0) {
         cursor_col_--;
@@ -355,7 +343,7 @@ void InteractiveEditor::move_word_right() {
 // ============================================================================
 
 void InteractiveEditor::request_suggestion() {
-    if (fetching_suggestion_) return;
+    if (fetching_suggestion_ || !router_) return;
 
     std::string content = get_content_before_cursor();
     if (content.empty()) return;
@@ -374,20 +362,21 @@ void InteractiveEditor::request_suggestion() {
     render_status_bar();
     terminal_->flush();
 
-    auto callback = [this](const std::string& chunk) -> bool {
+    // Streaming callback for real-time updates
+    dam::llm::StreamCallback callback = [this](const std::string& chunk) -> bool {
         current_suggestion_ += chunk;
         suggestion_visible_ = true;
         render();
         terminal_->flush();
-        return !client_.is_aborted();
+        return true;  // Continue receiving chunks
     };
 
     dam::Result<std::string> result = dam::Error(dam::ErrorCode::INTERNAL_ERROR, "");
 
     if (last_classification_ == InputType::NATURAL_LANG) {
-        result = client_.generate_from_nl(content, config_.language_hint, callback);
+        result = router_->generate_from_nl(content, config_.language_hint, callback);
     } else {
-        result = client_.complete_code(content, config_.language_hint, callback);
+        result = router_->complete_code(content, config_.language_hint, callback);
     }
 
     fetching_suggestion_ = false;
@@ -426,7 +415,9 @@ void InteractiveEditor::dismiss_suggestion() {
     current_suggestion_.clear();
     suggestion_visible_ = false;
     fetching_suggestion_ = false;
-    client_.abort();
+    if (router_) {
+        router_->abort();
+    }
 }
 
 // ============================================================================
@@ -521,7 +512,15 @@ void InteractiveEditor::render_status_bar() {
 
     // Left side: mode/state info
     if (fetching_suggestion_) {
-        terminal_->write_colored("[Thinking...]", colors::YELLOW);
+        std::string provider_info = "[Thinking";
+        if (router_) {
+            std::string provider = router_->active_provider_name();
+            if (!provider.empty()) {
+                provider_info += " (" + provider + ")";
+            }
+        }
+        provider_info += "...]";
+        terminal_->write_colored(provider_info, colors::YELLOW);
     } else if (suggestion_visible_) {
         terminal_->write_colored("[Tab: Accept | Esc: Dismiss]", colors::GREEN);
     } else {
@@ -530,6 +529,18 @@ void InteractiveEditor::render_status_bar() {
             case InputType::CODE: mode = "[Code]"; break;
             case InputType::NATURAL_LANG: mode = "[NL Command]"; break;
             default: mode = "[Ready]"; break;
+        }
+        // Show available providers
+        if (router_) {
+            bool has_local = router_->has_local_provider();
+            bool has_cloud = router_->has_cloud_provider();
+            if (has_local && has_cloud) {
+                mode += " Local+Cloud";
+            } else if (has_local) {
+                mode += " Local";
+            } else if (has_cloud) {
+                mode += " Cloud";
+            }
         }
         terminal_->write_colored(mode, colors::DIM);
     }
@@ -540,7 +551,7 @@ void InteractiveEditor::render_status_bar() {
     right << " | Ctrl+S: Submit | Ctrl+C: Cancel";
 
     std::string right_str = right.str();
-    int padding = editor_width_ - 30 - static_cast<int>(right_str.length());
+    int padding = editor_width_ - 40 - static_cast<int>(right_str.length());
     if (padding > 0) {
         terminal_->write(std::string(padding, ' '));
     }

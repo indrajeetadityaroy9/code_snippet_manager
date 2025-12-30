@@ -18,10 +18,18 @@ enum class ErrorCode {
     BUFFER_POOL_FULL,
     PAGE_PINNED,
     TRANSACTION_ABORTED,
-    WAL_ERROR,
     OUT_OF_SPACE,
     PERMISSION_DENIED,
-    INTERNAL_ERROR
+    INTERNAL_ERROR,
+    STORE_NOT_OPEN,     // Store must be opened before operations
+    // LLM-specific error codes
+    RATE_LIMITED,       // HTTP 429 - too many requests
+    TIMEOUT,            // Request timeout
+    NETWORK_ERROR,      // Connection failures
+    MODEL_NOT_FOUND,    // LLM model not available
+    AUTH_ERROR,         // Invalid API key or authentication failure
+    REQUIRES_MODEL_SELECTION,  // Multiple models available, user selection needed
+    OLLAMA_NOT_RUNNING  // Ollama server not running
 };
 
 // Error with code and message
@@ -55,10 +63,17 @@ public:
             case ErrorCode::BUFFER_POOL_FULL: return "BUFFER_POOL_FULL";
             case ErrorCode::PAGE_PINNED: return "PAGE_PINNED";
             case ErrorCode::TRANSACTION_ABORTED: return "TRANSACTION_ABORTED";
-            case ErrorCode::WAL_ERROR: return "WAL_ERROR";
             case ErrorCode::OUT_OF_SPACE: return "OUT_OF_SPACE";
             case ErrorCode::PERMISSION_DENIED: return "PERMISSION_DENIED";
             case ErrorCode::INTERNAL_ERROR: return "INTERNAL_ERROR";
+            case ErrorCode::STORE_NOT_OPEN: return "STORE_NOT_OPEN";
+            case ErrorCode::RATE_LIMITED: return "RATE_LIMITED";
+            case ErrorCode::TIMEOUT: return "TIMEOUT";
+            case ErrorCode::NETWORK_ERROR: return "NETWORK_ERROR";
+            case ErrorCode::MODEL_NOT_FOUND: return "MODEL_NOT_FOUND";
+            case ErrorCode::AUTH_ERROR: return "AUTH_ERROR";
+            case ErrorCode::REQUIRES_MODEL_SELECTION: return "REQUIRES_MODEL_SELECTION";
+            case ErrorCode::OLLAMA_NOT_RUNNING: return "OLLAMA_NOT_RUNNING";
             default: return "UNKNOWN";
         }
     }
@@ -174,54 +189,3 @@ inline Error Err(ErrorCode code, std::string message = "") {
 }
 
 }  // namespace dam
-
-// ============================================================================
-// Precondition Guard Macros
-// ============================================================================
-
-/**
- * Guard macro for checking if store is open.
- * Use in methods that return Result<T>.
- *
- * Example:
- *   Result<FileId> store_file(...) {
- *       DOCSTORE_REQUIRE_OPEN(is_open_);
- *       // ... rest of implementation
- *   }
- */
-#define DAM_REQUIRE_OPEN(is_open) \
-    do { \
-        if (!(is_open)) { \
-            return ::dam::Error(::dam::ErrorCode::INVALID_ARGUMENT, "Store is not open"); \
-        } \
-    } while(0)
-
-/**
- * Guard macro for methods returning empty containers when store is closed.
- * Use in const methods that return vectors, sets, etc.
- *
- * Example:
- *   std::vector<FileMetadata> get_all_files() const {
- *       DOCSTORE_REQUIRE_OPEN_OR_EMPTY(is_open_, {});
- *       // ... rest of implementation
- *   }
- */
-#define DAM_REQUIRE_OPEN_OR_EMPTY(is_open, empty_value) \
-    do { \
-        if (!(is_open)) { \
-            return empty_value; \
-        } \
-    } while(0)
-
-/**
- * Guard macro for checking if a condition holds, returning an error if not.
- *
- * Example:
- *   DOCSTORE_REQUIRE(file_id != INVALID_FILE_ID, INVALID_ARGUMENT, "Invalid file ID");
- */
-#define DAM_REQUIRE(condition, error_code, message) \
-    do { \
-        if (!(condition)) { \
-            return ::dam::Error(::dam::ErrorCode::error_code, message); \
-        } \
-    } while(0)

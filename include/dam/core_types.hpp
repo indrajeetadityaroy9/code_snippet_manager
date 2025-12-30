@@ -13,17 +13,9 @@ using PageId = uint32_t;
 // File identifier - unique within the document store
 using FileId = uint64_t;
 
-// Log Sequence Number - monotonically increasing
-using LSN = uint64_t;
-
-// Transaction identifier
-using TxnId = uint64_t;
-
 // Invalid/null values
 constexpr PageId INVALID_PAGE_ID = 0;
 constexpr FileId INVALID_FILE_ID = 0;
-constexpr LSN INVALID_LSN = 0;
-constexpr TxnId INVALID_TXN_ID = 0;
 
 // Page configuration
 constexpr size_t PAGE_SIZE = 4096;  // 4KB pages, aligned to disk blocks
@@ -51,21 +43,6 @@ enum class NodeType : uint8_t {
     UNINITIALIZED = 0x00,  // Default after page reset
     INTERNAL = 0x01,
     LEAF = 0x02
-};
-
-// Log record types for WAL
-enum class LogRecordType : uint8_t {
-    INVALID = 0x00,
-    BEGIN = 0x01,
-    COMMIT = 0x02,
-    ABORT = 0x03,
-    INSERT = 0x10,
-    DELETE = 0x11,
-    UPDATE = 0x12,
-    PAGE_SPLIT = 0x20,
-    PAGE_MERGE = 0x21,
-    CHECKPOINT_BEGIN = 0x30,
-    CHECKPOINT_END = 0x31
 };
 
 }  // namespace dam

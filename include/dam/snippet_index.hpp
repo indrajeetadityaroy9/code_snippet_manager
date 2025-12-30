@@ -84,11 +84,6 @@ public:
     size_t size() const { return count_; }
 
     /**
-     * Check if a snippet exists.
-     */
-    bool exists(SnippetId id) const;
-
-    /**
      * Get root page IDs for persistence.
      */
     PageId get_primary_root_id() const { return primary_tree_.get_root_page_id(); }

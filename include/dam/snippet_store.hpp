@@ -15,6 +15,13 @@
 
 namespace dam {
 
+// Forward declaration for search result
+struct SearchResult {
+    SnippetId id;
+    float score;
+    std::string matched_text;
+};
+
 /**
  * SnippetStore - Main API for the Developer Asset Manager.
  *
@@ -65,17 +72,17 @@ public:
      * Get a snippet by ID.
      *
      * @param id The snippet ID
-     * @return The snippet if found
+     * @return The snippet, or NOT_FOUND error
      */
-    std::optional<SnippetMetadata> get(SnippetId id) const;
+    Result<SnippetMetadata> get(SnippetId id) const;
 
     /**
      * Find a snippet by name.
      *
      * @param name The snippet name
-     * @return The snippet ID if found
+     * @return The snippet ID, or NOT_FOUND error
      */
-    std::optional<SnippetId> find_by_name(const std::string& name) const;
+    Result<SnippetId> find_by_name(const std::string& name) const;
 
     /**
      * Remove a snippet.
@@ -114,39 +121,54 @@ public:
     /**
      * List all snippets.
      *
-     * @return Vector of all snippets
+     * @return Vector of all snippets, or error
      */
-    std::vector<SnippetMetadata> list_all() const;
+    Result<std::vector<SnippetMetadata>> list_all() const;
 
     /**
      * Find snippets by tag.
      *
      * @param tag The tag to search for
-     * @return Matching snippets
+     * @return Matching snippets, or error
      */
-    std::vector<SnippetMetadata> find_by_tag(const std::string& tag) const;
+    Result<std::vector<SnippetMetadata>> find_by_tag(const std::string& tag) const;
 
     /**
      * Find snippets by language.
      *
      * @param language The language to search for
-     * @return Matching snippets
+     * @return Matching snippets, or error
      */
-    std::vector<SnippetMetadata> find_by_language(const std::string& language) const;
+    Result<std::vector<SnippetMetadata>> find_by_language(const std::string& language) const;
 
     /**
      * Get all unique tags.
      *
-     * @return Vector of tag names
+     * @return Vector of tag names, or error
      */
-    std::vector<std::string> get_all_tags() const;
+    Result<std::vector<std::string>> get_all_tags() const;
 
     /**
      * Get tag counts.
      *
-     * @return Map of tag name to snippet count
+     * @return Map of tag name to snippet count, or error
      */
-    std::map<std::string, size_t> get_tag_counts() const;
+    Result<std::map<std::string, size_t>> get_tag_counts() const;
+
+    // ========================================================================
+    // Search Operations
+    // ========================================================================
+
+    /**
+     * Search snippets by content.
+     * Uses simple substring matching when advanced search is not available.
+     *
+     * @param query The search query
+     * @param max_results Maximum results to return
+     * @return Matching snippets ranked by relevance, or error
+     */
+    Result<std::vector<SearchResult>> search(const std::string& query,
+                                              size_t max_results = 50) const;
 
     // ========================================================================
     // Statistics

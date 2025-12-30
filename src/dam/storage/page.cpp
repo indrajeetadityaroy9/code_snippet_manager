@@ -1,37 +1,12 @@
 #include <dam/storage/page.hpp>
+#include <dam/util/crc32.hpp>
 #include <algorithm>
 
 namespace dam {
 
-// Simple CRC32 implementation for checksum
-static uint32_t crc32_table[256];
-static bool crc32_table_initialized = false;
-
-static void init_crc32_table() {
-    if (crc32_table_initialized) return;
-
-    for (uint32_t i = 0; i < 256; ++i) {
-        uint32_t crc = i;
-        for (int j = 0; j < 8; ++j) {
-            crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320 : 0);
-        }
-        crc32_table[i] = crc;
-    }
-    crc32_table_initialized = true;
-}
-
-static uint32_t compute_crc32(const uint8_t* data, size_t len) {
-    init_crc32_table();
-    uint32_t crc = 0xFFFFFFFF;
-    for (size_t i = 0; i < len; ++i) {
-        crc = crc32_table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
-    }
-    return crc ^ 0xFFFFFFFF;
-}
-
 uint32_t Page::compute_checksum() const {
     // Compute checksum over data only (not header)
-    return compute_crc32(data_.data(), DATA_SIZE);
+    return CRC32::compute(data_.data(), DATA_SIZE);
 }
 
 // ============================================================================

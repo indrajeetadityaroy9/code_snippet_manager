@@ -2,8 +2,9 @@
 
 #include "terminal.hpp"
 #include "debouncer.hpp"
-#include "../llm/claude_client.hpp"
 #include "../llm/input_classifier.hpp"
+
+#include <dam/llm/router.hpp>
 
 #include <memory>
 #include <string>
@@ -15,7 +16,7 @@ namespace dam::cli {
  * Configuration for interactive editor.
  */
 struct InteractiveEditorConfig {
-    int debounce_ms = 450;              // Debounce delay before API calls
+    int debounce_ms = 300;              // Debounce delay before API calls (reduced for local LLM)
     int suggestion_timeout_ms = 10000;  // Timeout for waiting on suggestions
     bool show_status_bar = true;        // Show status bar with hints
     bool show_line_numbers = false;     // Show line numbers
@@ -39,15 +40,16 @@ struct EditorResult {
  * - Syntax autocomplete (gray ghost text, Tab to accept)
  * - Natural language to code generation
  * - Input debouncing to avoid excessive API calls
+ * - Automatic routing between local and cloud LLMs
  *
  * Usage:
- *   auto client = ClaudeClient::from_environment();
- *   if (!client) {
+ *   auto router = dam::llm::LLMFactory::create_from_env();
+ *   if (!router.ok()) {
  *       // Fall back to external editor
  *       return;
  *   }
  *
- *   InteractiveEditor editor(std::move(*client));
+ *   InteractiveEditor editor(std::move(router.value()));
  *   auto result = editor.run();
  *   if (result.accepted) {
  *       // Use result.content
@@ -56,9 +58,9 @@ struct EditorResult {
 class InteractiveEditor {
 public:
     /**
-     * Create editor with Claude client.
+     * Create editor with LLM router.
      */
-    explicit InteractiveEditor(ClaudeClient client,
+    explicit InteractiveEditor(std::unique_ptr<dam::llm::LLMRouter> router,
                                InteractiveEditorConfig config = {});
 
     /**
@@ -89,7 +91,7 @@ public:
     const InteractiveEditorConfig& config() const { return config_; }
 
 private:
-    ClaudeClient client_;
+    std::unique_ptr<dam::llm::LLMRouter> router_;
     InteractiveEditorConfig config_;
     std::unique_ptr<Terminal> terminal_;
     Debouncer debouncer_;
@@ -117,7 +119,6 @@ private:
     void insert_newline();
     void delete_char_backward();      // Backspace
     void delete_char_forward();       // Delete key
-    void delete_line();
     void move_cursor_left();
     void move_cursor_right();
     void move_cursor_up();
