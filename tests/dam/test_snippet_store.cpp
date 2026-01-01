@@ -376,6 +376,263 @@ TEST_F(SnippetStoreTest, AddTagToNonexistentFails) {
 }
 
 // ============================================================================
+// Update Operations
+// ============================================================================
+
+TEST_F(SnippetStoreTest, UpdateContent) {
+    auto store = open_store();
+
+    auto add_result = store->add("original content", "my-snippet", {"tag1"}, "bash");
+    ASSERT_TRUE(add_result.ok());
+    SnippetId id = add_result.value();
+
+    auto update_result = store->update(id, "new content", "my-snippet",
+                                        {"tag1"}, "bash", "");
+    ASSERT_TRUE(update_result.ok()) << update_result.error().to_string();
+
+    auto snippet = store->get(id);
+    ASSERT_TRUE(snippet.ok());
+    EXPECT_EQ(snippet.value().content, "new content");
+    EXPECT_EQ(snippet.value().id, id);  // ID preserved
+}
+
+TEST_F(SnippetStoreTest, UpdateName) {
+    auto store = open_store();
+
+    auto add_result = store->add("content", "old-name", {}, "python");
+    ASSERT_TRUE(add_result.ok());
+    SnippetId id = add_result.value();
+
+    auto update_result = store->update(id, "content", "new-name", {}, "python", "");
+    ASSERT_TRUE(update_result.ok());
+
+    // Old name no longer exists
+    auto old_lookup = store->find_by_name("old-name");
+    EXPECT_FALSE(old_lookup.ok());
+
+    // New name works
+    auto new_lookup = store->find_by_name("new-name");
+    ASSERT_TRUE(new_lookup.ok());
+    EXPECT_EQ(new_lookup.value(), id);
+}
+
+TEST_F(SnippetStoreTest, UpdateTags) {
+    auto store = open_store();
+
+    auto add_result = store->add("content", "snippet", {"old-tag"}, "bash");
+    ASSERT_TRUE(add_result.ok());
+    SnippetId id = add_result.value();
+
+    auto update_result = store->update(id, "content", "snippet",
+                                        {"new-tag1", "new-tag2"}, "bash", "");
+    ASSERT_TRUE(update_result.ok());
+
+    auto snippet = store->get(id);
+    ASSERT_TRUE(snippet.ok());
+    EXPECT_EQ(snippet.value().tags.size(), 2);
+
+    // Tag index should be updated
+    auto old_tag_snippets = store->find_by_tag("old-tag");
+    ASSERT_TRUE(old_tag_snippets.ok());
+    EXPECT_EQ(old_tag_snippets.value().size(), 0);
+
+    auto new_tag_snippets = store->find_by_tag("new-tag1");
+    ASSERT_TRUE(new_tag_snippets.ok());
+    EXPECT_EQ(new_tag_snippets.value().size(), 1);
+}
+
+TEST_F(SnippetStoreTest, UpdatePreservesId) {
+    auto store = open_store();
+
+    auto add_result = store->add("content", "snippet", {"tag"}, "python");
+    ASSERT_TRUE(add_result.ok());
+    SnippetId original_id = add_result.value();
+
+    auto update_result = store->update(original_id, "updated", "new-name",
+                                        {"new-tag"}, "bash", "description");
+    ASSERT_TRUE(update_result.ok());
+
+    // Only one snippet should exist
+    EXPECT_EQ(store->count(), 1);
+
+    // Should have the same ID
+    auto snippet = store->get(original_id);
+    ASSERT_TRUE(snippet.ok());
+    EXPECT_EQ(snippet.value().id, original_id);
+}
+
+TEST_F(SnippetStoreTest, UpdateNonexistentFails) {
+    auto store = open_store();
+
+    auto result = store->update(999, "content", "name", {}, "bash", "");
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.error_code(), ErrorCode::NOT_FOUND);
+}
+
+TEST_F(SnippetStoreTest, UpdateWithDuplicateNameFails) {
+    auto store = open_store();
+
+    store->add("content1", "snippet1", {});
+    auto r2 = store->add("content2", "snippet2", {});
+    ASSERT_TRUE(r2.ok());
+    SnippetId id2 = r2.value();
+
+    // Try to rename snippet2 to snippet1
+    auto result = store->update(id2, "content2", "snippet1", {}, "text", "");
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.error_code(), ErrorCode::ALREADY_EXISTS);
+}
+
+TEST_F(SnippetStoreTest, UpdateWithEmptyNameFails) {
+    auto store = open_store();
+
+    auto add_result = store->add("content", "snippet", {});
+    ASSERT_TRUE(add_result.ok());
+    SnippetId id = add_result.value();
+
+    auto result = store->update(id, "content", "", {}, "text", "");
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.error_code(), ErrorCode::INVALID_ARGUMENT);
+}
+
+TEST_F(SnippetStoreTest, UpdatePersistsAcrossReopen) {
+    SnippetId id;
+
+    {
+        auto store = open_store();
+        auto add_result = store->add("original", "snippet", {"old-tag"}, "python");
+        ASSERT_TRUE(add_result.ok());
+        id = add_result.value();
+
+        auto update_result = store->update(id, "updated content", "new-name",
+                                            {"new-tag"}, "bash", "my description");
+        ASSERT_TRUE(update_result.ok());
+        store->close();
+    }
+
+    {
+        auto store = open_store();
+        auto snippet = store->get(id);
+        ASSERT_TRUE(snippet.ok());
+        EXPECT_EQ(snippet.value().content, "updated content");
+        EXPECT_EQ(snippet.value().name, "new-name");
+        EXPECT_EQ(snippet.value().language, "bash");
+        EXPECT_EQ(snippet.value().description, "my description");
+        ASSERT_EQ(snippet.value().tags.size(), 1);
+        EXPECT_EQ(snippet.value().tags[0], "new-tag");
+    }
+}
+
+// ============================================================================
+// Search Operations
+// ============================================================================
+
+TEST_F(SnippetStoreTest, SearchByName) {
+    auto store = open_store();
+
+    store->add("echo hello", "hello-script", {"bash"});
+    store->add("print world", "world-printer", {"python"});
+    store->add("goodbye world", "farewell", {"bash"});
+
+    auto results = store->search("hello");
+    ASSERT_TRUE(results.ok());
+    ASSERT_GE(results.value().size(), 1);
+    // Should find "hello-script" by name
+    bool found_hello = false;
+    for (const auto& r : results.value()) {
+        auto snippet = store->get(r.id);
+        if (snippet.ok() && snippet.value().name == "hello-script") {
+            found_hello = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found_hello);
+}
+
+TEST_F(SnippetStoreTest, SearchByContent) {
+    auto store = open_store();
+
+    store->add("echo hello world", "script1", {});
+    store->add("print('goodbye')", "script2", {});
+    store->add("console.log('hello')", "script3", {});
+
+    auto results = store->search("hello");
+    ASSERT_TRUE(results.ok());
+    ASSERT_GE(results.value().size(), 2);  // script1 and script3
+}
+
+TEST_F(SnippetStoreTest, SearchByTag) {
+    auto store = open_store();
+
+    store->add("content1", "s1", {"utility", "bash"});
+    store->add("content2", "s2", {"helper"});
+    store->add("content3", "s3", {"utility", "python"});
+
+    auto results = store->search("utility");
+    ASSERT_TRUE(results.ok());
+    ASSERT_GE(results.value().size(), 2);  // s1 and s3
+}
+
+TEST_F(SnippetStoreTest, SearchCaseInsensitive) {
+    auto store = open_store();
+
+    store->add("Hello World", "greeting", {});
+    store->add("HELLO THERE", "shout", {});
+
+    auto results = store->search("hello");
+    ASSERT_TRUE(results.ok());
+    EXPECT_EQ(results.value().size(), 2);
+}
+
+TEST_F(SnippetStoreTest, SearchNoResults) {
+    auto store = open_store();
+
+    store->add("echo hello", "script", {});
+
+    auto results = store->search("xyz123nonexistent");
+    ASSERT_TRUE(results.ok());
+    EXPECT_EQ(results.value().size(), 0);
+}
+
+TEST_F(SnippetStoreTest, SearchEmptyQuery) {
+    auto store = open_store();
+
+    store->add("content", "snippet", {});
+
+    auto results = store->search("");
+    ASSERT_TRUE(results.ok());
+    EXPECT_EQ(results.value().size(), 0);
+}
+
+TEST_F(SnippetStoreTest, SearchMaxResults) {
+    auto store = open_store();
+
+    // Add many snippets with "test" in name
+    for (int i = 0; i < 10; ++i) {
+        store->add("content", "test-snippet-" + std::to_string(i), {});
+    }
+
+    auto results = store->search("test", 5);
+    ASSERT_TRUE(results.ok());
+    EXPECT_LE(results.value().size(), 5);
+}
+
+TEST_F(SnippetStoreTest, SearchScoreOrdering) {
+    auto store = open_store();
+
+    // Name match should score higher than content match
+    store->add("some random content", "hello-world", {});  // Name match
+    store->add("hello there", "other-script", {});  // Content match only
+
+    auto results = store->search("hello");
+    ASSERT_TRUE(results.ok());
+    ASSERT_GE(results.value().size(), 2);
+
+    // First result should have higher score
+    EXPECT_GE(results.value()[0].score, results.value()[1].score);
+}
+
+// ============================================================================
 // Language Detector Unit Tests
 // ============================================================================
 

@@ -1,9 +1,21 @@
-# Dependencies for LLM integration
+# Dependencies
 #
-# This module provides libcurl and nlohmann_json for the interactive
-# LLM-assisted autocomplete feature.
+# This module provides external dependencies:
+# - CLI11: Command-line argument parsing
+# - nlohmann_json: JSON parsing for LLM integration
+# - libcurl: HTTP requests for LLM integration
 
 include(FetchContent)
+
+# CLI11 for command-line argument parsing (header-only)
+message(STATUS "Fetching CLI11...")
+FetchContent_Declare(
+    cli11
+    GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
+    GIT_TAG v2.4.2
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(cli11)
 
 # nlohmann_json for JSON parsing
 message(STATUS "Fetching nlohmann_json...")

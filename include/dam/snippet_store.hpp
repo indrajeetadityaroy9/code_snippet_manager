@@ -92,6 +92,28 @@ public:
      */
     Result<void> remove(SnippetId id);
 
+    /**
+     * Update a snippet atomically.
+     *
+     * Updates content, name, language, description, and tags in a single
+     * atomic operation. Unlike remove+add, this preserves the snippet ID
+     * and is safe against partial failures.
+     *
+     * @param id The snippet ID
+     * @param content New content
+     * @param name New name (must be unique if changed)
+     * @param tags New tags (replaces existing tags)
+     * @param language New language
+     * @param description New description
+     * @return Success or error
+     */
+    Result<void> update(SnippetId id,
+                        const std::string& content,
+                        const std::string& name,
+                        const std::vector<std::string>& tags,
+                        const std::string& language,
+                        const std::string& description);
+
     // ========================================================================
     // Tag Operations
     // ========================================================================

@@ -139,8 +139,7 @@ Result<SnippetId> SnippetStore::add(const std::string& content,
                                               const std::string& language,
                                               const std::string& description) {
     if (!is_open_) {
-        return Error(ErrorCode::INVALID_ARGUMENT,
-                               "Store is not open");
+        return Error(ErrorCode::STORE_NOT_OPEN, "Store is not open");
     }
 
     if (name.empty()) {
@@ -239,8 +238,7 @@ Result<SnippetId> SnippetStore::find_by_name(const std::string& name) const {
 
 Result<void> SnippetStore::remove(SnippetId id) {
     if (!is_open_) {
-        return Error(ErrorCode::INVALID_ARGUMENT,
-                               "Store is not open");
+        return Error(ErrorCode::STORE_NOT_OPEN, "Store is not open");
     }
 
     auto snippet = snippet_index_->get(id);
@@ -264,10 +262,117 @@ Result<void> SnippetStore::remove(SnippetId id) {
     return Ok();
 }
 
+Result<void> SnippetStore::update(SnippetId id,
+                                   const std::string& content,
+                                   const std::string& name,
+                                   const std::vector<std::string>& tags,
+                                   const std::string& language,
+                                   const std::string& description) {
+    if (!is_open_) {
+        return Error(ErrorCode::STORE_NOT_OPEN, "Store is not open");
+    }
+
+    if (name.empty()) {
+        return Error(ErrorCode::INVALID_ARGUMENT, "Snippet name cannot be empty");
+    }
+
+    // Get existing snippet
+    auto existing = snippet_index_->get(id);
+    if (!existing.has_value()) {
+        return Error(ErrorCode::NOT_FOUND, "Snippet not found");
+    }
+
+    // Check for name conflict if name changed
+    if (name != existing->name) {
+        auto conflict = snippet_index_->find_by_name(name);
+        if (conflict.has_value()) {
+            return Error(ErrorCode::ALREADY_EXISTS,
+                         "Snippet with name '" + name + "' already exists");
+        }
+    }
+
+    // Compute tag changes
+    std::set<std::string> old_tags(existing->tags.begin(), existing->tags.end());
+    std::set<std::string> new_tags(tags.begin(), tags.end());
+
+    std::vector<std::string> tags_to_remove;
+    std::vector<std::string> tags_to_add;
+
+    for (const auto& tag : old_tags) {
+        if (new_tags.find(tag) == new_tags.end()) {
+            tags_to_remove.push_back(tag);
+        }
+    }
+    for (const auto& tag : new_tags) {
+        if (old_tags.find(tag) == old_tags.end()) {
+            tags_to_add.push_back(tag);
+        }
+    }
+
+    // Update snippet metadata
+    SnippetMetadata updated = *existing;
+    updated.content = content;
+    updated.name = name;
+    updated.language = language;
+    updated.description = description;
+    updated.tags = tags;
+    updated.modified_at = std::chrono::system_clock::now();
+    updated.checksum = CRC32::compute(content);
+
+    // Step 1: Apply tag changes to tag_index FIRST
+    // Track successful operations for rollback
+    std::vector<std::string> removed_tags;
+    std::vector<std::string> added_tags;
+    bool tag_failed = false;
+
+    // Remove old tags
+    for (const auto& tag : tags_to_remove) {
+        if (tag_index_->remove_file_from_tag(tag, id)) {
+            removed_tags.push_back(tag);
+        }
+        // Continue even if removal fails (tag might not exist in index)
+    }
+
+    // Add new tags
+    for (const auto& tag : tags_to_add) {
+        if (!tag_index_->add_file_to_tag(tag, id)) {
+            tag_failed = true;
+            break;
+        }
+        added_tags.push_back(tag);
+    }
+
+    // If tag addition failed, rollback and return error
+    if (tag_failed) {
+        // Rollback added tags
+        for (const auto& tag : added_tags) {
+            tag_index_->remove_file_from_tag(tag, id);
+        }
+        // Rollback removed tags (re-add them)
+        for (const auto& tag : removed_tags) {
+            tag_index_->add_file_to_tag(tag, id);
+        }
+        return Error(ErrorCode::INTERNAL_ERROR, "Failed to update tags");
+    }
+
+    // Step 2: Update snippet in index
+    if (!snippet_index_->update(id, updated)) {
+        // Rollback tag changes
+        for (const auto& tag : added_tags) {
+            tag_index_->remove_file_from_tag(tag, id);
+        }
+        for (const auto& tag : removed_tags) {
+            tag_index_->add_file_to_tag(tag, id);
+        }
+        return Error(ErrorCode::INTERNAL_ERROR, "Failed to update snippet");
+    }
+
+    return Ok();
+}
+
 Result<void> SnippetStore::add_tag(SnippetId id, const std::string& tag) {
     if (!is_open_) {
-        return Error(ErrorCode::INVALID_ARGUMENT,
-                               "Store is not open");
+        return Error(ErrorCode::STORE_NOT_OPEN, "Store is not open");
     }
 
     auto snippet = snippet_index_->get(id);
@@ -307,8 +412,7 @@ Result<void> SnippetStore::add_tag(SnippetId id, const std::string& tag) {
 
 Result<void> SnippetStore::remove_tag(SnippetId id, const std::string& tag) {
     if (!is_open_) {
-        return Error(ErrorCode::INVALID_ARGUMENT,
-                               "Store is not open");
+        return Error(ErrorCode::STORE_NOT_OPEN, "Store is not open");
     }
 
     auto snippet = snippet_index_->get(id);
